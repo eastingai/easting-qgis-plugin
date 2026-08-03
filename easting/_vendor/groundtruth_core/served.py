@@ -1,0 +1,108 @@
+"""The server's judgement, as the plugin sees it.
+
+These dataclasses mirror the `groundtruth_verdicts` block of a `/v1/extract`
+response. They are the plugin's *only* source of verdicts and geometry: nothing
+here computes anything, because the code that could compute it (traverse.py,
+validators.py) is not vendored into the plugin.
+
+Stdlib only, like everything the plugin ships.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class TractGeometry:
+    """A computed traverse in its local plane: POB at the origin, feet.
+
+    `vertices` is one point per call endpoint plus the start, so a tract with N
+    calls has N+1 vertices. When the traverse closes, the last vertex is the
+    start again (within `misclosure`); when it does not, the caller closes the
+    ring itself.
+    """
+
+    vertices: list[tuple[float, float]] = field(default_factory=list)
+    misclosure: float = 0.0
+    perimeter_ft: float = 0.0
+    # None means the traverse closes exactly — JSON cannot carry Infinity.
+    closure_denominator: float | None = None
+    acres: float = 0.0
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TractGeometry:
+        return cls(
+            vertices=[(float(x), float(y)) for x, y in d.get("vertices") or []],
+            misclosure=float(d.get("misclosure") or 0.0),
+            perimeter_ft=float(d.get("perimeter_ft") or 0.0),
+            closure_denominator=(
+                None if d.get("closure_denominator") is None else float(d["closure_denominator"])
+            ),
+            acres=float(d.get("acres") or 0.0),
+        )
+
+
+@dataclass
+class GeorefGeometry:
+    """Georeferenced geometry for an aliquot tract: lon/lat rings straight
+    from the PLSS fabric, so placement needs no POB click. Metes-and-bounds
+    verdicts never carry one (a deed defines shape, not location)."""
+
+    rings: list[list[tuple[float, float]]] = field(default_factory=list)
+    acres: float = 0.0
+    plss_id: str = ""
+    source: str = ""
+    crs: str = "EPSG:4326"
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> GeorefGeometry:
+        return cls(
+            rings=[[(float(x), float(y)) for x, y in ring] for ring in d.get("rings") or []],
+            acres=float(d.get("acres") or 0.0),
+            plss_id=d.get("plss_id") or "",
+            source=d.get("source") or "",
+            crs=d.get("crs") or "EPSG:4326",
+        )
+
+
+@dataclass
+class ServerVerdict:
+    """One tract's GroundTruth verdict, index-aligned with `extraction.tracts`."""
+
+    tract: str
+    status: str  # "PASS" | "REVIEW" | "FAIL"
+    reasons: list[str] = field(default_factory=list)
+    closure_ratio: str | None = None
+    computed_acres: float | None = None
+    # None when the tract could not be traversed at all, which is exactly the
+    # case where placement must be refused.
+    geometry: TractGeometry | None = None
+    # Present on aliquot verdicts from 0.4+ servers; .get() keeps older
+    # responses parsing. When set, the plugin can place without a POB click.
+    georef: GeorefGeometry | None = None
+
+    @property
+    def passed(self) -> bool:
+        return self.status == "PASS"
+
+    @property
+    def placeable(self) -> bool:
+        return self.geometry is not None and len(self.geometry.vertices) >= 2
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ServerVerdict:
+        geometry = d.get("geometry")
+        georef = d.get("georef")
+        return cls(
+            tract=d.get("tract") or "",
+            status=d.get("status") or "FAIL",
+            reasons=[str(r) for r in d.get("reasons") or []],
+            closure_ratio=d.get("closure_ratio"),
+            computed_acres=(
+                None if d.get("computed_acres") is None else float(d["computed_acres"])
+            ),
+            geometry=TractGeometry.from_dict(geometry) if geometry else None,
+            georef=GeorefGeometry.from_dict(georef) if georef else None,
+        )
