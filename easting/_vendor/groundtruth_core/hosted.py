@@ -1,6 +1,6 @@
 """Client for the hosted Easting API — what the QGIS plugin actually calls.
 
-The plugin ships no prompt, no model choice and no Anthropic key: it uploads a
+The plugin ships no prompt, no model choice and no provider credentials: it uploads a
 PDF to `POST {api_url}/v1/extract` with an `east_live_...` bearer token and gets
 back an extraction plus the authoritative GroundTruth verdicts. Stdlib only,
 like everything the plugin vendors.
@@ -24,8 +24,8 @@ SERVER_TOO_OLD = (
     "Easting settings, or contact support@easting.ai."
 )
 
-# Extraction is 10-120s of model time behind this call, so a retry is expensive
-# and the server already retries Anthropic itself. One extra attempt, no more.
+# Extraction is 10-120s of work behind this call, so a retry is expensive and
+# the server already retries its upstream itself. One extra attempt, no more.
 MAX_RETRIES = 1
 TIMEOUT = 300.0
 RETRIABLE = frozenset({429, 502, 503})

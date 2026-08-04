@@ -54,7 +54,7 @@ class ReviewDock(QDockWidget):
 
         self._container = QWidget()
         self._layout = QVBoxLayout(self._container)
-        self._layout.setAlignment(Qt.AlignTop)
+        self._layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -172,7 +172,7 @@ class ReviewDock(QDockWidget):
             return
         panel = QLabel("<br>".join(lines))
         panel.setWordWrap(True)
-        panel.setTextFormat(Qt.RichText)
+        panel.setTextFormat(Qt.TextFormat.RichText)
         panel.setStyleSheet(f"color:{secondary_text()}; font-size:11px;")
         self._layout.addWidget(panel)
 
@@ -187,7 +187,7 @@ class ReviewDock(QDockWidget):
             + (f" · stated {tract.stated_acreage} ac" if tract.stated_acreage else "")
             + (" · SAVE AND EXCEPT" if tract.is_exception else "")
         )
-        title.setTextFormat(Qt.RichText)
+        title.setTextFormat(Qt.TextFormat.RichText)
         self._layout.addWidget(title)
 
         if verdict.geometry is not None:
@@ -236,7 +236,7 @@ class ReviewDock(QDockWidget):
             ["#", "type", "bearing", "dist", "conf", "adjoiner", "verbatim"]
         )
         table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         for i, call in enumerate(calls):
             bearing = call.effective_bearing()
             cells = [

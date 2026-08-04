@@ -1,9 +1,8 @@
 """The server's judgement, as the plugin sees it.
 
 These dataclasses mirror the `groundtruth_verdicts` block of a `/v1/extract`
-response. They are the plugin's *only* source of verdicts and geometry: nothing
-here computes anything, because the code that could compute it (traverse.py,
-validators.py) is not vendored into the plugin.
+response. They are the plugin's only source of verdicts and geometry; nothing
+here computes anything.
 
 Stdlib only, like everything the plugin ships.
 """

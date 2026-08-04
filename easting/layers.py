@@ -28,10 +28,12 @@ from qgis.PyQt.QtCore import QVariant
 from ._vendor.groundtruth_core.model import Tract
 from ._vendor.groundtruth_core.served import ServerVerdict
 
-FEET_UNIT = QgsUnitTypes.DistanceFeet
+FEET_UNIT = QgsUnitTypes.DistanceUnit.DistanceFeet
 
 
-def _fields(defs: list[tuple[str, QVariant.Type]]) -> QgsFields:
+# Field defs pair a name with a QVariant type code. Annotated as int because
+# Qt6 removed QVariant's type-enum name while keeping the values.
+def _fields(defs: list[tuple[str, int]]) -> QgsFields:
     fields = QgsFields()
     for name, ftype in defs:
         fields.append(QgsField(name, ftype))
@@ -182,9 +184,11 @@ def save_geopackage(layers: list[QgsVectorLayer], path: str) -> str | None:
         options.driverName = "GPKG"
         options.layerName = layer.name().replace(" — ", " - ")
         if i > 0:
-            options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+            options.actionOnExistingFile = (
+                QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+            )
         err, msg, *_ = QgsVectorFileWriter.writeAsVectorFormatV3(layer, path, ctx, options)
-        if err != QgsVectorFileWriter.NoError:
+        if err != QgsVectorFileWriter.WriterError.NoError:
             return msg or f"write failed for {layer.name()}"
     return None
 
@@ -204,7 +208,9 @@ def area_check(layer: QgsVectorLayer) -> float:
     feat = next(layer.getFeatures(), None)
     if feat is None:
         return 0.0
-    return da.convertAreaMeasurement(da.measureArea(feat.geometry()), QgsUnitTypes.AreaAcres)
+    return da.convertAreaMeasurement(
+        da.measureArea(feat.geometry()), QgsUnitTypes.AreaUnit.AreaAcres
+    )
 
 
 def place_georeferenced_tract(

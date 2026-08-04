@@ -16,7 +16,7 @@ class PlacePobTool(QgsMapToolEmitPoint):
     Feet-to-map-unit scaling and rotation are applied here for the preview;
     layers.place_tract repeats the same transform when the user confirms.
 
-    The vertex list comes from the API — the plugin carries no traverse math —
+    The vertex list comes from the API —
     but every live interaction is an affine transform over that fixed list, so
     the preview stays as responsive as it ever was.
     """
@@ -31,7 +31,7 @@ class PlacePobTool(QgsMapToolEmitPoint):
         self._feet_factor = feet_factor
         self._rotation_deg = 0.0
         self._pob: QgsPointXY | None = None
-        self._band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+        self._band = QgsRubberBand(canvas, QgsWkbTypes.GeometryType.PolygonGeometry)
         self._band.setColor(QColor(29, 95, 191, 60))
         self._band.setStrokeColor(QColor(29, 95, 191))
         self._band.setWidth(2)
@@ -58,11 +58,11 @@ class PlacePobTool(QgsMapToolEmitPoint):
         return self._rotation_deg
 
     def clear(self) -> None:
-        self._band.reset(QgsWkbTypes.PolygonGeometry)
+        self._band.reset(QgsWkbTypes.GeometryType.PolygonGeometry)
         self._pob = None
 
     def deactivate(self) -> None:
-        self._band.reset(QgsWkbTypes.PolygonGeometry)
+        self._band.reset(QgsWkbTypes.GeometryType.PolygonGeometry)
         super().deactivate()
 
     def _draw_at(self, origin: QgsPointXY) -> None:

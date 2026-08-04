@@ -1,4 +1,4 @@
-"""Retrying HTTP POST over urllib, shared by the Anthropic and hosted clients.
+"""Retrying HTTP POST over urllib, shared by the extraction and hosted clients.
 
 Stdlib only: QGIS's bundled Python has no requests. Callers supply an `on_error`
 hook to turn specific status codes into user-facing messages; anything they do
@@ -36,12 +36,19 @@ def post_with_retries(
     `on_error(status, detail)` returns a user-facing message to raise straight
     away, or None to let this function decide (retry if retriable, else raise).
     """
+    if not url.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+        raise ExtractionError(
+            f"refusing non-HTTPS endpoint {url.split('://')[0]!r}: the API URL "
+            "must be https (localhost excepted, for development)"
+        )
     delay = 2.0
     last_err: Exception | None = None
     for attempt in range(max_retries + 1):
         req = urllib.request.Request(url, data=body, method="POST", headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # Scheme is validated above; file:/ and custom schemes cannot
+            # reach this call.
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
                 return resp.read()
         except urllib.error.HTTPError as exc:
             detail = error_detail(exc)
@@ -68,7 +75,7 @@ def post_with_retries(
 def error_detail(exc: urllib.error.HTTPError) -> str:
     """Pull a human message out of an error body.
 
-    Anthropic and the Easting API both use `{"error": {"message": ...}}`, so one
+    Both upstream APIs use `{"error": {"message": ...}}`, so one
     reader covers both.
     """
     try:

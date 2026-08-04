@@ -31,25 +31,45 @@ class EastingPlugin:
         self._active_verdict: ServerVerdict | None = None
         self._placed_layers: list = []
         self._actions: list[QAction] = []
+        self._toolbar = None
 
     # -- QGIS lifecycle ------------------------------------------------------
     def initGui(self) -> None:  # noqa: N802
+        # The Easting toolbar is a shared platform surface: sibling Easting
+        # plugins locate it by OBJECT NAME (findChild matches that, not the
+        # visible title) and add their own actions rather than creating a
+        # second bar. "EastingToolBar" is therefore a contract; changing it
+        # strands every plugin that looks it up.
+        from qgis.PyQt.QtWidgets import QToolBar
+
+        self._toolbar = self.iface.mainWindow().findChild(QToolBar, "EastingToolBar")
+        if self._toolbar is None:
+            self._toolbar = self.iface.addToolBar("Easting")
+            self._toolbar.setObjectName("EastingToolBar")
+
         icon = QIcon(str(Path(__file__).parent / "icon.png"))
         extract = QAction(icon, "Extract deed…", self.iface.mainWindow())
         extract.triggered.connect(self.run_extract)
-        self.iface.addToolBarIcon(extract)
+        self._toolbar.addAction(extract)
         self.iface.addPluginToMenu("Easting", extract)
 
         settings = QAction("Settings…", self.iface.mainWindow())
         settings.triggered.connect(self.show_settings)
+        self._toolbar.addAction(settings)
         self.iface.addPluginToMenu("Easting", settings)
 
         self._actions = [extract, settings]
 
     def unload(self) -> None:
         for action in self._actions:
-            self.iface.removeToolBarIcon(action)
+            if self._toolbar is not None:
+                self._toolbar.removeAction(action)
             self.iface.removePluginMenu("Easting", action)
+        # Take the toolbar down only when nothing else still lives on it: a
+        # sibling plugin may have joined the shared surface after us.
+        if self._toolbar is not None and not self._toolbar.actions():
+            self._toolbar.deleteLater()
+        self._toolbar = None
         if self._dock is not None:
             self.iface.removeDockWidget(self._dock)
             self._dock = None
@@ -79,7 +99,7 @@ class EastingPlugin:
         self._task.failed.connect(self._on_failed)
         QgsApplication.taskManager().addTask(self._task)
         self.iface.messageBar().pushMessage(
-            "Easting", f"Extracting {self._source_doc}…", level=Qgis.Info
+            "Easting", f"Extracting {self._source_doc}…", level=Qgis.MessageLevel.Info
         )
 
     def _on_extracted(self, result: ExtractionResult) -> None:
@@ -91,7 +111,7 @@ class EastingPlugin:
             self._dock.rotation_changed.connect(self._on_rotation)
             self._dock.place_confirmed.connect(self._confirm_placement)
             self._dock.save_requested.connect(self._save_gpkg)
-            self.iface.addDockWidget(Qt.RightDockWidgetArea, self._dock)
+            self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock)
         self._dock.show_result(result, self._source_doc)
         self._dock.show()
         self._dock.raise_()
@@ -116,7 +136,7 @@ class EastingPlugin:
         self.iface.messageBar().pushMessage(
             "Easting",
             f"Placed {tract.name} at its PLSS location.",
-            level=Qgis.Success,
+            level=Qgis.MessageLevel.Success,
         )
         canvas = self.iface.mapCanvas()
         canvas.setExtent(poly.extent())
@@ -149,21 +169,23 @@ class EastingPlugin:
 
         self._active_tract = tract
         self._active_verdict = verdict
-        factor = QgsUnitTypes.fromUnitToUnitFactor(QgsUnitTypes.DistanceFeet, crs.mapUnits())
+        factor = QgsUnitTypes.fromUnitToUnitFactor(
+            QgsUnitTypes.DistanceUnit.DistanceFeet, crs.mapUnits()
+        )
         self._release_tool()
         self._tool = PlacePobTool(self.iface.mapCanvas(), verdict.geometry.vertices, factor)
         self._tool.pob_picked.connect(
             lambda _: self.iface.messageBar().pushMessage(
                 "Easting",
                 "POB set. Adjust rotation in the dock, then Confirm placement.",
-                level=Qgis.Info,
+                level=Qgis.MessageLevel.Info,
             )
         )
         self.iface.mapCanvas().setMapTool(self._tool)
         self.iface.messageBar().pushMessage(
             "Easting",
             f"Click the point of beginning for {tract.name}.",
-            level=Qgis.Info,
+            level=Qgis.MessageLevel.Info,
         )
 
     def _on_rotation(self, degrees: float) -> None:
@@ -195,7 +217,7 @@ class EastingPlugin:
         self._placed_layers.extend([poly, lines])
         self._release_tool()
         self.iface.messageBar().pushMessage(
-            "Easting", f"Placed {self._active_tract.name}.", level=Qgis.Success
+            "Easting", f"Placed {self._active_tract.name}.", level=Qgis.MessageLevel.Success
         )
 
     def _save_gpkg(self) -> None:
@@ -215,7 +237,9 @@ class EastingPlugin:
         if error:
             QMessageBox.warning(self.iface.mainWindow(), "Easting", error)
         else:
-            self.iface.messageBar().pushMessage("Easting", f"Saved {path}", level=Qgis.Success)
+            self.iface.messageBar().pushMessage(
+                "Easting", f"Saved {path}", level=Qgis.MessageLevel.Success
+            )
 
     def _release_tool(self) -> None:
         if self._tool is not None:

@@ -1,8 +1,8 @@
 """Settings: the Easting API key and the service URL.
 
-The plugin is hosted-only. It holds no Anthropic key and picks no model — the
-Easting API does both — so this dialog collects a key and a URL and nothing
-else.
+The plugin is hosted-only. It holds no provider credentials and picks no
+model — the Easting API does both — so this dialog collects a key and a URL
+and nothing else.
 """
 
 from __future__ import annotations
@@ -18,16 +18,18 @@ from qgis.PyQt.QtWidgets import (
 
 from .theme import secondary_text
 
-SERVICE_KEY_SETTING = "easting/service_key"
+SERVICE_KEY_SETTING = (
+    "easting/service_key"  # pragma: allowlist secret (a QgsSettings path, not a credential)
+)
 API_URL_SETTING = "easting/api_url"
 
 DEFAULT_API_URL = "https://api.easting.ai"
 
 # BYOK is gone, and with it the settings that fed it: "easting/api_key" and
 # "easting/model" (plus the "groundtruth/*" pair they were migrated from). They
-# are deliberately left in QgsSettings rather than removed — an Anthropic key is
-# the user's property, and silently deleting one from their profile on upgrade
-# would be presumptuous. Nothing reads them.
+# are deliberately left in QgsSettings rather than removed — a provider API key
+# is the user's property, and silently deleting one from their profile on
+# upgrade would be presumptuous. Nothing reads them.
 
 
 def get_service_key() -> str:
@@ -47,7 +49,7 @@ class SettingsDialog(QDialog):
         form = QFormLayout(self)
 
         self._key_edit = QLineEdit(get_service_key())
-        self._key_edit.setEchoMode(QLineEdit.Password)
+        self._key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._key_edit.setPlaceholderText("east_live_...")
         form.addRow("Easting API key", self._key_edit)
 
@@ -76,7 +78,9 @@ class SettingsDialog(QDialog):
         note.setStyleSheet(f"color:{secondary_text()};")
         form.addRow(note)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)

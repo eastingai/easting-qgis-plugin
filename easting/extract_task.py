@@ -20,7 +20,7 @@ class ExtractTask(QgsTask):
     failed = pyqtSignal(str)
 
     def __init__(self, pdf_path: str, api_url: str, api_key: str):
-        super().__init__(f"Easting: extracting {pdf_path}", QgsTask.CanCancel)
+        super().__init__(f"Easting: extracting {pdf_path}", QgsTask.Flag.CanCancel)
         self._pdf_path = pdf_path
         self._api_url = api_url
         self._api_key = api_key

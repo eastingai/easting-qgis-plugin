@@ -1,20 +1,11 @@
-"""Extraction data model: stdlib dataclass twin of the spike's pydantic schema.
+"""Extraction data model: the shapes a /v1/extract response carries.
 
-The QGIS plugin runs in QGIS's bundled Python, which ships neither pydantic
-nor the anthropic SDK, so the engine keeps to the standard library. Field
-names and semantics mirror deeds-spike/src/groundtruth/schema.py exactly
-(the parity test in tests/test_parity.py holds the two in agreement), and
-DEED_JSON_SCHEMA is the structured-outputs schema sent to the API.
+Stdlib only: the QGIS plugin runs in QGIS's bundled Python, which ships no
+third-party packages. Bearings travel as components
+(ns/degrees/minutes/seconds/ew), never as a free string.
 
-Rules carried over from the spike:
-- Bearings cross the LLM boundary as components (ns/degrees/minutes/seconds/ew),
-  never as a free string.
-
-This module is **pure parse and display**. Turning a Call into a traverse leg
-lives in validators.py, which is server-side only: the geometry interpretation
-— chord-course handling, curve direction — is engine IP and does not ship in
-the plugin. (The build guard greps the vendored copy for those symbol names, so
-this file must not even mention them.)
+This module is pure parse and display; all computation happens on the
+Easting service.
 """
 
 from __future__ import annotations
@@ -96,8 +87,8 @@ class Call:
     def tie_from_wire(cls, s: str) -> Call:
         """Parse a tie course from the wire's one-string form (TIE_FORMAT):
         "bearing=N 00 15 05.0 E | distance=318.60 | verbatim=...". Tie courses
-        are display-only (never traversed), so an unparseable string degrades
-        to a bearing-less call carrying the verbatim text."""
+        are display-only, so an unparseable string degrades to a bearing-less
+        call carrying the verbatim text."""
         rest = s.strip()
         verbatim = ""
         if "verbatim=" in rest:
@@ -202,10 +193,8 @@ class LotBlockRef:
     parsing stays out of scope; the reference is what an evaluator, an index,
     or a future chain needs.
 
-    On the wire each reference is ONE delimited string (see LOT_BLOCK_FORMAT):
-    the structured-outputs grammar budget belongs to the boundary calls, so
-    metadata rides flat and this parser rebuilds the structure. Rich dicts
-    (ground truth, server responses) parse too."""
+    On the wire each reference is ONE delimited string (see LOT_BLOCK_FORMAT);
+    this parser rebuilds the structure. Rich dicts parse too."""
 
     verbatim_text: str
     subdivision: str | None = None
@@ -316,8 +305,8 @@ ALIQUOT_TOKENS = ("N2", "S2", "E2", "W2", "NE4", "NW4", "SE4", "SW4")
 
 @dataclass
 class AliquotDescription:
-    """A PLSS quarter/half chain, pure data. The grid arithmetic that turns it
-    into geometry is server-side (plss.py, never vendored).
+    """A PLSS quarter/half chain, pure data; the Easting service computes
+    the geometry.
 
     parts reads in document order and applies right to left: ["SE4","SW4"]
     is "SE 1/4 of the SW 1/4". government_lot and exception_text force REVIEW
@@ -447,9 +436,8 @@ def _parse_aliquot_value(v: Any) -> AliquotDescription | None:
     return None
 
 
-# JSON Schema sent to the API via output_config.format. Mirrors the pydantic
-# schema the spike's messages.parse() generated; structured outputs require
-# additionalProperties: false and full required lists on every object.
+# JSON Schema for the extraction shapes above: additionalProperties false
+# and full required lists on every object.
 _BEARING_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -467,26 +455,21 @@ _NULLABLE_BEARING = {"anyOf": [_BEARING_SCHEMA, {"type": "null"}]}
 _NULLABLE_NUMBER = {"anyOf": [{"type": "number"}, {"type": "null"}]}
 _NULLABLE_STRING = {"anyOf": [{"type": "string"}, {"type": "null"}]}
 
-# Metadata crosses the LLM boundary flat: plain strings, no nested objects,
-# no anyOf/null unions. The structured-outputs grammar compiler budgets both
-# union-typed parameters and total grammar size, and the boundary-call schema
-# rightfully spends that budget; nested metadata objects tipped it into
-# "compiled grammar is too large" / compile timeouts. References and lot
-# entries ride as one delimited string each (REF_FORMAT / LOT_BLOCK_FORMAT);
-# RecordingRef.from_wire and LotBlockRef.from_wire rebuild the structure, and
-# unparseable strings degrade to note-only/verbatim-only rather than lose the
-# citation. Absent scalars cross as "" and normalize back to None.
+# References and lot entries cross the wire as one delimited string each
+# (REF_FORMAT / LOT_BLOCK_FORMAT); RecordingRef.from_wire and
+# LotBlockRef.from_wire rebuild the structure, and unparseable strings degrade
+# to note-only/verbatim-only rather than lose the citation. Absent scalars
+# cross as "" and normalize back to None.
 REF_FORMAT = "book=<book> | page=<page> | instrument=<number> | note=<what it is for>"
 LOT_BLOCK_FORMAT = (
     "subdivision=<name> | lot=<lot> | block=<block> | plat_book=<book> | "
     "plat_page=<page> | verbatim=<sentence>"
 )
-# Tie courses ride flat too (display-only, never traversed, so a lossy parse
-# costs a table row, not geometry). Bearing is "N <deg> <min> <sec> E" style.
+# Tie courses ride flat too (display-only, so a lossy parse costs a table
+# row, not geometry). Bearing is "N <deg> <min> <sec> E" style.
 TIE_FORMAT = "bearing=<N 00 15 05.0 E> | distance=<318.60> | verbatim=<the course text>"
-# The aliquot chain rides as one delimited string per tract; parse_aliquot_wire
-# rebuilds it. Structured aliquot objects overflowed the grammar budget when
-# combined with the call schema.
+# The aliquot chain rides as one delimited string per tract;
+# parse_aliquot_wire rebuilds it.
 ALIQUOT_FORMAT = (
     "parts=<SE4 SW4 SE4> | section=<9> | township=<17S> | range=<18E> | "
     "meridian=<name if stated> | government_lot=<number if any> | "
