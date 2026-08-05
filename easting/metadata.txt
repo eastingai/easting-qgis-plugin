@@ -3,18 +3,19 @@ name=Easting
 qgisMinimumVersion=3.28
 description=Turn recorded deeds into validated parcel geometry. Vision-LLM extraction of metes-and-bounds descriptions, checked by deterministic closure math; click the point of beginning to place the parcel on your map.
 about=Easting reads a deed PDF, extracts every boundary call (bearing/distance/curves), then recomputes the traverse and validates closure and stated acreage before anything reaches your map. Every result carries a GroundTruth verdict, the verification layer behind all Easting products: PASS (closes and corroborates), REVIEW (flagged for human eyes, with reasons), FAIL (not traversable). REQUIRES A SERVICE ACCOUNT: extraction runs on the hosted Easting API, so the plugin uploads each document you extract to easting.ai and needs an Easting API key to work. There is no offline mode. See https://easting.ai for keys and terms. This release covers Easting Deeds: metes-and-bounds and PLSS/aliquot descriptions. Aliquot tracts georeference from the BLM CadNSDI fabric and place with one click; deed metadata (parties, recording references, plat citations) and tie courses render in the review dock and export with the GeoPackage.
-version=0.4.1
+version=0.4.2
 author=Easting
 email=support@easting.ai
 license=GPL-2.0-or-later
 experimental=False
 hasProcessingProvider=no
 tags=deed,parcel,cadastre,ocr,ai,digitizing,land records,metes and bounds
-homepage=https://easting.ai
+homepage=https://easting.ai/products/deeds/
 tracker=https://github.com/eastingai/easting-qgis-plugin/issues
 repository=https://github.com/eastingai/easting-qgis-plugin
 icon=icon.png
 changelog=
+    0.4.2 Free trial at signup (3 documents, card required) and self-serve key management at easting.ai/account; the settings dialog points at both. Plugin homepage now links the product page that documents the workflow.
     0.4.1 Qt6 compatibility (scoped enums throughout) and security-scan compliance for the plugin repository: HTTPS-only transport enforcement, restructured verdict color tables, an allowlisted settings path. No functional changes.
     0.4.0 PLSS/aliquot parsing with one-click georeferenced placement (BLM CadNSDI), deed metadata panel (grantor/grantee, recording refs, plat citations), structured tie courses, and per-call adjoiners; all new data exports to GeoPackage.
     0.3.0 All engine logic moved server-side; verdicts and traverse geometry now come from the Easting API. Toolbar icon, GPL license file, and a trimmed review-dock header.
