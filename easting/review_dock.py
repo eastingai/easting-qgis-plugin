@@ -41,6 +41,8 @@ __all__ = ["ReviewDock"]
 
 class ReviewDock(QDockWidget):
     place_requested = pyqtSignal(object, object)  # (Tract, Verdict)
+    # [(Tract, Verdict), ...] whose verdicts share one commencement anchor.
+    group_place_requested = pyqtSignal(list)
     place_georef_requested = pyqtSignal(object, object)  # (Tract, Verdict) — no POB click
     save_requested = pyqtSignal()
     rotation_changed = pyqtSignal(float)
@@ -93,14 +95,36 @@ class ReviewDock(QDockWidget):
 
         if not ex.legal_description_found or not ex.tracts:
             msg = QLabel(
-                "No metes-and-bounds or PLSS/aliquot description found in this "
-                "document (lot-and-block conveyances are recorded as plat "
-                "references in the metadata above)."
+                "No locatable description found in this document. Deeds and "
+                "easements describe land by courses or by PLSS chains; "
+                "lot-and-block conveyances and easement areas that live only "
+                "on an attached drawing are recorded in the metadata above "
+                "rather than drawn."
             )
             msg.setWordWrap(True)
             msg.setStyleSheet(f"color:{verdict_text_color('FAIL')}; font-weight:bold;")
             self._layout.addWidget(msg)
             return
+
+        # A composite conveyance ties every tract to one commencement
+        # monument; when the server says several tracts share an anchor, one
+        # click can place them all in their documented relative positions.
+        groups: dict[str, list] = {}
+        for tract, verdict in zip(ex.tracts, result.verdicts, strict=True):
+            if verdict.groupable:
+                groups.setdefault(verdict.anchor, []).append((tract, verdict))
+        for anchor, pairs in groups.items():
+            if len(pairs) < 2:
+                continue
+            # Anchors are the document's own monument text and can run long;
+            # elide on the button, keep the full text where a hover finds it.
+            shown = anchor if len(anchor) <= 44 else anchor[:43].rstrip() + "…"
+            button = QPushButton(
+                f"Place all {len(pairs)} tracts as a group — click: {shown}"
+            )
+            button.setToolTip(f"Shared commencement point: {anchor}")
+            button.clicked.connect(lambda _, p=pairs: self.group_place_requested.emit(p))
+            self._layout.addWidget(button)
 
         # Index-aligned by contract, and hosted.py rejects any response where
         # they are not — so strict=True can only fire on a real bug, and a loud
@@ -184,7 +208,7 @@ class ReviewDock(QDockWidget):
             f'<span style="background:{badge_bg}; color:#ffffff; padding:2px 8px; '
             f'border-radius:3px;" title="GroundTruth verdict">{verdict.status}</span> '
             f"<b>{tract.name}</b>"
-            + (f" · stated {tract.stated_acreage} ac" if tract.stated_acreage else "")
+            + _stated_area_text(tract)
             + (" · SAVE AND EXCEPT" if tract.is_exception else "")
         )
         title.setTextFormat(Qt.TextFormat.RichText)
@@ -193,14 +217,29 @@ class ReviewDock(QDockWidget):
         if verdict.geometry is not None:
             ratio = verdict.closure_ratio
             closure = "closes exactly" if ratio == "exact" else f"closure {ratio}"
-            self._layout.addWidget(QLabel(f"{closure} · computed {verdict.geometry.acres:.3f} ac"))
+            sqft = getattr(verdict, "computed_sqft", None)
+            if getattr(tract, "stated_area_sqft", None) and sqft:
+                computed = f"computed {sqft:,.0f} sq ft"
+            else:
+                computed = f"computed {verdict.geometry.acres:.3f} ac"
+            self._layout.addWidget(QLabel(f"{closure} · {computed}"))
         for reason in verdict.reasons:
             lbl = QLabel(f"• {reason}")
             lbl.setWordWrap(True)
             lbl.setStyleSheet(f"color:{reason_color};")
             self._layout.addWidget(lbl)
 
-        self._layout.addWidget(self._call_table(tract.calls))
+        easement = getattr(tract, "easement", None)
+        if easement is not None:
+            self._layout.addWidget(_easement_card(easement))
+
+        if tract.calls:
+            label = getattr(tract, "description_type", "") == "centerline"
+            if label:
+                header = QLabel("Centerline courses — the strip follows this line")
+                header.setStyleSheet(f"color:{secondary_text()}; font-size:11px;")
+                self._layout.addWidget(header)
+            self._layout.addWidget(self._call_table(tract.calls))
 
         tie_calls = getattr(tract, "tie_calls", None) or []
         if tie_calls:
@@ -274,3 +313,42 @@ class ReviewDock(QDockWidget):
             item = self._layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+
+def _stated_area_text(tract) -> str:
+    """Report the area the document stated, in the document's own unit. Small
+    easements are stated in square feet, where acres round too coarsely to
+    mean anything."""
+    sqft = getattr(tract, "stated_area_sqft", None)
+    if sqft:
+        return f" · stated {sqft:,.0f} sq ft"
+    if tract.stated_acreage:
+        return f" · stated {tract.stated_acreage} ac"
+    return ""
+
+
+def _easement_card(easement) -> QLabel:
+    """What the instrument burdens the land with, in the order a land agent
+    reads it: what it is for, how wide, how long, whose exclusive use, what
+    rights it grants, and which parcel carries it."""
+    bits = []
+    if easement.easement_type:
+        bits.append(f"<b>{easement.easement_type.title()} easement</b>")
+    if easement.width_ft:
+        bits.append(f"{easement.width_ft:g} ft wide")
+    if easement.term:
+        bits.append(easement.term)
+    if easement.exclusive is not None:
+        bits.append("exclusive" if easement.exclusive else "non-exclusive")
+    lines = [" · ".join(bits)] if bits else []
+    if easement.rights:
+        lines.append(f"Rights: {', '.join(easement.rights)}")
+    if easement.servient_reference is not None:
+        text = easement.servient_reference.text()
+        if text:
+            lines.append(f"Burdens: {text}")
+    label = QLabel("<br>".join(lines) or "Easement")
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setWordWrap(True)
+    label.setStyleSheet(f"color:{secondary_text()}; font-size:11px;")
+    return label

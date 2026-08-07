@@ -20,8 +20,13 @@ there for processing. There's no offline mode. Subscribe at
 
 ## What it covers
 
-Metes-and-bounds descriptions (including curve calls) and PLSS aliquot
-descriptions. A metes-and-bounds deed defines shape, not location, so
+Deeds and recorded easements. For deeds: metes-and-bounds descriptions
+(including curve calls) and PLSS aliquot descriptions. For easements: the
+burden itself (type, width, term, exclusivity, granted rights, and the
+parcel it encumbers) plus verification where the instrument locates its own
+area. An easement whose area exists only on an attached drawing, or whose
+centerline follows facilities not yet built, is reported as unverifiable
+rather than guessed at. A metes-and-bounds deed defines shape, not location, so
 placement is a click on the point of beginning; an aliquot tract
 georeferences from BLM's public PLSS fabric and places itself. Lot-and-block
 conveyances are captured as plat references. Deed metadata (parties,

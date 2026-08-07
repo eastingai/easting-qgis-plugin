@@ -2,4 +2,4 @@
 
 # Stamped into every hosted extraction response so a result can be traced back
 # to the engine that produced it.
-__version__ = "0.4.0"
+__version__ = "0.5.0"

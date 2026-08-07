@@ -377,6 +377,11 @@ class Tract:
     # "metes_and_bounds" | "aliquot", per tract: mixed documents exist (an
     # aliquot conveyance with a metes-and-bounds LESS AND EXCEPT parcel).
     description_type: str = "metes_and_bounds"
+    # Documents state small easement areas in square feet, and three decimals
+    # of acreage is coarser than the acreage tolerance at that size, so the
+    # document's own unit has to survive.
+    stated_area_sqft: float | None = None
+    easement: EasementDescription | None = None
     aliquot: AliquotDescription | None = None
 
     @classmethod
@@ -393,6 +398,8 @@ class Tract:
                 for c in d.get("tie_calls") or []
             ],
             description_type=d.get("description_type") or "metes_and_bounds",
+            stated_area_sqft=_opt_float(d.get("stated_area_sqft")),
+            easement=_easement_of(d.get("easement")),
             aliquot=_parse_aliquot_value(d.get("aliquot")),
         )
 
@@ -424,6 +431,18 @@ class DeedExtraction:
 
 def _opt_float(v: Any) -> float | None:
     return None if v is None else float(v)
+
+
+def _easement_of(v: Any) -> EasementDescription | None:
+    """Accept either the wire string or a rich dict (ground truth, server)."""
+    if not v:
+        return None
+    if isinstance(v, str):
+        return parse_easement_wire(v)
+    if isinstance(v, dict):
+        found = EasementDescription.from_dict(v)
+        return None if found.is_empty() else found
+    return None
 
 
 def _parse_aliquot_value(v: Any) -> AliquotDescription | None:
@@ -468,6 +487,94 @@ LOT_BLOCK_FORMAT = (
 # Tie courses ride flat too (display-only, so a lossy parse costs a table
 # row, not geometry). Bearing is "N <deg> <min> <sec> E" style.
 TIE_FORMAT = "bearing=<N 00 15 05.0 E> | distance=<318.60> | verbatim=<the course text>"
+
+
+@dataclass
+class EasementDescription:
+    """The burden an easement instrument creates, as data.
+
+    Six description shapes appear in recorded easements and only some of them
+    locate anything. This carries what every shape states regardless: what the
+    easement is for, how wide when a width is given, how long it lasts, whether
+    it excludes the grantor, what rights it grants, and which land it burdens.
+    """
+
+    verbatim_text: str = ""
+    easement_type: str = ""
+    width_ft: float | None = None
+    term: str = ""
+    exclusive: bool | None = None
+    rights: list[str] = field(default_factory=list)
+    servient_reference: RecordingRef | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> EasementDescription:
+        servient = d.get("servient_reference")
+        return cls(
+            verbatim_text=d.get("verbatim_text") or "",
+            easement_type=d.get("easement_type") or "",
+            width_ft=_opt_float(d.get("width_ft")),
+            term=d.get("term") or "",
+            exclusive=d.get("exclusive"),
+            rights=[str(r) for r in d.get("rights") or []],
+            servient_reference=(
+                RecordingRef.from_dict(servient) if isinstance(servient, dict) else None
+            ),
+        )
+
+    def is_empty(self) -> bool:
+        return not (self.verbatim_text or self.easement_type or self.rights)
+
+
+def parse_easement_wire(raw: str) -> EasementDescription | None:
+    """Rebuild an EasementDescription from the wire string (EASEMENT_FORMAT).
+
+    Same degradation rule as every other wire parser here: an unparseable
+    string keeps its verbatim text rather than losing the citation.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    verbatim = ""
+    if "verbatim=" in text:
+        text, _, verbatim = text.partition("verbatim=")
+        verbatim = verbatim.strip().strip("<>")
+    fields: dict[str, str] = {}
+    for part in text.split(" | "):
+        key, eq, value = part.strip().rstrip("|").strip().partition("=")
+        if eq:
+            fields[key.strip()] = value.strip().strip("<>")
+    exclusive: bool | None = None
+    raw_exclusive = (fields.get("exclusive") or "").lower()
+    if raw_exclusive in ("yes", "true", "exclusive"):
+        exclusive = True
+    elif raw_exclusive in ("no", "false", "non-exclusive", "nonexclusive"):
+        exclusive = False
+    # The servient reference nests inside a "|"-delimited string, so it uses
+    # semicolons and gets translated before RecordingRef sees it. Anything
+    # unparseable still survives as a note.
+    servient = (fields.get("servient") or "").replace(" ; ", " | ")
+    return EasementDescription(
+        verbatim_text=verbatim or raw.strip(),
+        easement_type=fields.get("type") or "",
+        width_ft=_opt_float(fields.get("width_ft")),
+        term=fields.get("term") or "",
+        exclusive=exclusive,
+        rights=[r for r in (fields.get("rights") or "").replace(",", " ").split() if r],
+        servient_reference=RecordingRef.from_wire(servient) if servient else None,
+    )
+
+
+# An easement's burden rides as one delimited string per tract;
+# parse_easement_wire rebuilds it. Only the shapes that locate geometry also
+# fill calls; the rest carry the burden and nothing else.
+EASEMENT_FORMAT = (
+    "type=<utility> | width_ft=<30> | term=<perpetual> | exclusive=<no> | "
+    "rights=<ingress egress maintain> | "
+    "servient=<book=123 ; page=45 ; instrument=2024001234 ; note=what it is> | "
+    "verbatim=<the granting sentence>"
+)
+
 # The aliquot chain rides as one delimited string per tract;
 # parse_aliquot_wire rebuilds it.
 ALIQUOT_FORMAT = (
@@ -562,7 +669,10 @@ _METADATA_SCHEMA: dict[str, Any] = {
 DEED_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "document_kind": {"type": "string", "enum": ["deed", "plat", "as_built", "other"]},
+        "document_kind": {
+            "type": "string",
+            "enum": ["deed", "easement", "plat", "as_built", "other"],
+        },
         "legal_description_found": {"type": "boolean"},
         "basis_of_bearings": _NULLABLE_STRING,
         "tracts": {
@@ -624,8 +734,21 @@ DEED_JSON_SCHEMA: dict[str, Any] = {
                     "tie_calls": {"type": "array", "items": {"type": "string"}},
                     "description_type": {
                         "type": "string",
-                        "enum": ["metes_and_bounds", "aliquot"],
+                        "enum": [
+                            "metes_and_bounds",
+                            "aliquot",
+                            "centerline",
+                            "blanket",
+                            "exhibit_referenced",
+                            "facility_relative",
+                        ],
                     },
+                    # Square feet as the document states them; see the field's
+                    # comment on Tract for why acres alone will not do.
+                    "stated_area_sqft": _NULLABLE_NUMBER,
+                    # One EASEMENT_FORMAT string; "" when the tract is not an
+                    # easement burden.
+                    "easement": {"type": "string"},
                     # One ALIQUOT_FORMAT string; "" for metes-and-bounds tracts.
                     "aliquot": {"type": "string"},
                 },
@@ -639,6 +762,8 @@ DEED_JSON_SCHEMA: dict[str, Any] = {
                     "tie_calls",
                     "description_type",
                     "aliquot",
+                    "stated_area_sqft",
+                    "easement",
                 ],
                 "additionalProperties": False,
             },

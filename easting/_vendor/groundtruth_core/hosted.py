@@ -145,8 +145,15 @@ def _verdicts_for(extraction: DeedExtraction, raw: object) -> list[ServerVerdict
     except (AttributeError, TypeError, ValueError) as exc:
         raise ExtractionError(f"Could not parse the GroundTruth verdicts: {exc}") from exc
 
-    # A FAIL legitimately has no geometry; anything else must carry it.
-    if any(v.geometry is None and v.status != "FAIL" for v in verdicts):
+    # Geometry is owed only where there are courses to draw. A FAIL has none;
+    # neither does an easement that declines to locate itself (blanket,
+    # drawing-only, facility-relative) — those arrive as REVIEW with an empty
+    # call list and only the burden to show. A tract WITH boundary calls and
+    # no geometry means the server predates engine 0.3.
+    if any(
+        v.geometry is None and v.status != "FAIL" and t.calls
+        for t, v in zip(extraction.tracts, verdicts, strict=True)
+    ):
         raise ExtractionError(SERVER_TOO_OLD)
     return verdicts
 

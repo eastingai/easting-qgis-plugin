@@ -1,4 +1,10 @@
-"""Map tool: click the point of beginning to place the active tract."""
+"""Map tool: click the point of beginning to place the active tract.
+
+The same tool places a GROUP: a composite conveyance whose tracts all tie
+to one commencement monument previews every ring at once, each translated
+by its server-computed tie offset, and one click on the monument places
+them all. Rotation turns the whole assembly around the click.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +33,11 @@ class PlacePobTool(QgsMapToolEmitPoint):
         super().__init__(canvas)
         self._canvas = canvas
         # The server computed these; the tool only ever transforms them.
-        self._vertices = vertices
+        # Internally everything is a group: a single tract is a group of one
+        # with a zero offset.
+        self._rings: list[tuple[tuple[float, float], list[tuple[float, float]]]] = [
+            ((0.0, 0.0), vertices)
+        ]
         self._feet_factor = feet_factor
         self._rotation_deg = 0.0
         self._pob: QgsPointXY | None = None
@@ -37,6 +47,22 @@ class PlacePobTool(QgsMapToolEmitPoint):
         self._band.setWidth(2)
 
     # -- live preview under the cursor -------------------------------------
+    @classmethod
+    def for_group(
+        cls,
+        canvas,
+        rings: list[tuple[tuple[float, float], list[tuple[float, float]]]],
+        feet_factor: float,
+    ) -> PlacePobTool:
+        """A tool whose click point is the shared commencement monument.
+
+        `rings` pairs each tract's tie offset (feet east/north of the
+        monument) with its POB-at-origin vertex list.
+        """
+        tool = cls(canvas, rings[0][1], feet_factor)
+        tool._rings = list(rings)
+        return tool
+
     def canvasMoveEvent(self, event) -> None:
         if self._pob is None:
             self._draw_at(self.toMapCoordinates(event.pos()))
@@ -68,13 +94,22 @@ class PlacePobTool(QgsMapToolEmitPoint):
     def _draw_at(self, origin: QgsPointXY) -> None:
         theta = math.radians(self._rotation_deg)
         cos_t, sin_t = math.cos(theta), math.sin(theta)
-        pts = []
-        for x_ft, y_ft in self._vertices:
-            xr = x_ft * cos_t - y_ft * sin_t
-            yr = x_ft * sin_t + y_ft * cos_t
-            pts.append(
-                QgsPointXY(origin.x() + xr * self._feet_factor, origin.y() + yr * self._feet_factor)
-            )
-        if pts[0] != pts[-1]:
-            pts.append(pts[0])
-        self._band.setToGeometry(QgsGeometry.fromPolygonXY([pts]), None)
+        polygons = []
+        for (off_x, off_y), vertices in self._rings:
+            pts = []
+            for x_ft, y_ft in vertices:
+                # Offset and ring rotate together: the assembly turns as one
+                # around the clicked monument.
+                tx, ty = x_ft + off_x, y_ft + off_y
+                xr = tx * cos_t - ty * sin_t
+                yr = tx * sin_t + ty * cos_t
+                pts.append(
+                    QgsPointXY(
+                        origin.x() + xr * self._feet_factor,
+                        origin.y() + yr * self._feet_factor,
+                    )
+                )
+            if pts[0] != pts[-1]:
+                pts.append(pts[0])
+            polygons.append([pts])
+        self._band.setToGeometry(QgsGeometry.fromMultiPolygonXY(polygons), None)

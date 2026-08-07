@@ -3,7 +3,7 @@ name=Easting
 qgisMinimumVersion=3.28
 description=Turn recorded deeds into validated parcel geometry. Vision-LLM extraction of metes-and-bounds descriptions, checked by deterministic closure math; click the point of beginning to place the parcel on your map.
 about=Easting reads a deed PDF, extracts every boundary call (bearing/distance/curves), then recomputes the traverse and validates closure and stated acreage before anything reaches your map. Every result carries a GroundTruth verdict, the verification layer behind all Easting products: PASS (closes and corroborates), REVIEW (flagged for human eyes, with reasons), FAIL (not traversable). REQUIRES A SERVICE ACCOUNT: extraction runs on the hosted Easting API, so the plugin uploads each document you extract to easting.ai and needs an Easting API key to work. There is no offline mode. See https://easting.ai for keys and terms. This release covers Easting Deeds: metes-and-bounds and PLSS/aliquot descriptions. Aliquot tracts georeference from the BLM CadNSDI fabric and place with one click; deed metadata (parties, recording references, plat citations) and tie courses render in the review dock and export with the GeoPackage.
-version=0.4.2
+version=0.5.0
 author=Easting
 email=support@easting.ai
 license=GPL-2.0-or-later
@@ -15,6 +15,7 @@ tracker=https://github.com/eastingai/easting-qgis-plugin/issues
 repository=https://github.com/eastingai/easting-qgis-plugin
 icon=icon.png
 changelog=
+    0.5.0 Recorded easements and rights of way are a document class: the review dock shows what an easement burdens the land with (type, width, term, exclusivity, granted rights, servient parcel), verdicts refuse honestly when an easement's area lives only on a drawing or follows facilities not yet built, and small easements verify against stated square footage rather than rounded acreage. All of it exports to GeoPackage. Composite conveyances place as a group: one click on the shared commencement point places every tract, ties and all, and that works across classes (a deed's parcels or an instrument's easement tracts alike). Settings names the $30 document pack (10 credits, never expire) beside the free trial for occasional use. A step-by-step user guide lives at easting.ai/help/.
     0.4.2 Free trial at signup (3 documents, card required) and self-serve key management at easting.ai/account; the settings dialog points at both. Plugin homepage now links the product page that documents the workflow.
     0.4.1 Qt6 compatibility (scoped enums throughout) and security-scan compliance for the plugin repository: HTTPS-only transport enforcement, restructured verdict color tables, an allowlisted settings path. No functional changes.
     0.4.0 PLSS/aliquot parsing with one-click georeferenced placement (BLM CadNSDI), deed metadata panel (grantor/grantee, recording refs, plat citations), structured tie courses, and per-call adjoiners; all new data exports to GeoPackage.

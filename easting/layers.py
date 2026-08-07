@@ -33,6 +33,17 @@ FEET_UNIT = QgsUnitTypes.DistanceUnit.DistanceFeet
 
 # Field defs pair a name with a QVariant type code. Annotated as int because
 # Qt6 removed QVariant's type-enum name while keeping the values.
+def _easement_attrs(tract) -> list:
+    """The five easement columns, in TRACT_FIELDS order. A tract with no
+    easement burden writes blanks rather than being treated specially."""
+    e = getattr(tract, "easement", None)
+    if e is None:
+        return ["", None, "", "", ""]
+    exclusive = "" if e.exclusive is None else ("yes" if e.exclusive else "no")
+    servient = e.servient_reference.text() if e.servient_reference is not None else ""
+    return [e.easement_type, e.width_ft, e.term, exclusive, servient]
+
+
 def _fields(defs: list[tuple[str, int]]) -> QgsFields:
     fields = QgsFields()
     for name, ftype in defs:
@@ -54,6 +65,11 @@ TRACT_FIELDS = _fields(
         ("pob_description", QVariant.String),
         # Stage 1 metadata, flattened into strings for the attribute table
         # and GeoPackage export. Empty on responses from pre-0.4 servers.
+        ("easement_type", QVariant.String),
+        ("easement_width_ft", QVariant.Double),
+        ("easement_term", QVariant.String),
+        ("easement_exclusive", QVariant.String),
+        ("servient_ref", QVariant.String),
         ("grantors", QVariant.String),
         ("grantees", QVariant.String),
         ("recording_ref", QVariant.String),
@@ -77,6 +93,49 @@ CALL_FIELDS = _fields(
         ("verbatim_text", QVariant.String),
     ]
 )
+
+
+def place_group(
+    pairs,
+    anchor: QgsPointXY,
+    crs: QgsCoordinateReferenceSystem,
+    rotation_deg: float,
+    source_doc: str,
+    metadata=None,
+):
+    """Place every tract of a composite from one click on their shared
+    commencement monument.
+
+    `pairs` is [(tract, verdict), ...] where each verdict carries a
+    tie_offset in feet relative to the monument. Each tract's POB lands at
+    anchor + rotated offset, and the shared rotation turns the assembly as
+    one; the per-tract layers are exactly what place_tract builds. Returns
+    the list of (polygon, lines) layer pairs, skipping tracts the server
+    could not traverse.
+    """
+    import math
+
+    factor = QgsUnitTypes.fromUnitToUnitFactor(QgsUnitTypes.DistanceUnit.DistanceFeet, crs.mapUnits())
+    theta = math.radians(rotation_deg)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    placed = []
+    for tract, verdict in pairs:
+        off_x, off_y = verdict.tie_offset or (0.0, 0.0)
+        xr = off_x * cos_t - off_y * sin_t
+        yr = off_x * sin_t + off_y * cos_t
+        pob = QgsPointXY(anchor.x() + xr * factor, anchor.y() + yr * factor)
+        layers = place_tract(
+            tract=tract,
+            verdict=verdict,
+            pob=pob,
+            crs=crs,
+            rotation_deg=rotation_deg,
+            source_doc=source_doc,
+            metadata=metadata,
+        )
+        if layers is not None:
+            placed.append(layers)
+    return placed
 
 
 def place_tract(
@@ -133,6 +192,7 @@ def place_tract(
             tract.is_exception,
             source_doc,
             tract.pob_description,
+            *_easement_attrs(tract),
             ", ".join(metadata.grantors) if metadata else "",
             ", ".join(metadata.grantees) if metadata else "",
             metadata.recording.text() if metadata and metadata.recording else "",
@@ -257,6 +317,7 @@ def place_georeferenced_tract(
             tract.is_exception,
             source_doc,
             aliquot.verbatim_text if aliquot else tract.pob_description,
+            *_easement_attrs(tract),
             ", ".join(metadata.grantors) if metadata else "",
             ", ".join(metadata.grantees) if metadata else "",
             metadata.recording.text() if metadata and metadata.recording else "",

@@ -58,11 +58,15 @@ class SettingsDialog(QDialog):
         form.addRow("API URL", self._url_edit)
 
         get_key = QLabel(
+            'New to the plugin? <a href="https://easting.ai/help/">The user '
+            "guide</a> walks install through GeoPackage export. "
             'No key yet? <a href="https://easting.ai/products/deeds/">Start a free '
             "trial at easting.ai</a>: 3 documents on us, card required, and the "
-            "key is shown once at checkout. Lost the key, or rotating it? "
-            '<a href="https://api.easting.ai/account">Manage it at your account '
-            "page</a>. Using the service means accepting the "
+            "key is shown once at checkout. Only need a few documents a year? "
+            'A <a href="https://api.easting.ai/billing/checkout?tier=pack-10">'
+            "$30 document pack</a> holds 10 credits that never expire. Lost the "
+            'key, or rotating it? <a href="https://api.easting.ai/account">Manage '
+            "it at your account page</a>. Using the service means accepting the "
             '<a href="https://easting.ai/terms/">Terms of Service</a> and '
             '<a href="https://easting.ai/privacy/">Privacy Policy</a>; checkout '
             "asks for that acceptance explicitly."

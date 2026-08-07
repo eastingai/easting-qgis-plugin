@@ -19,6 +19,18 @@ from .result import ExtractionError
 # failures. 400/401/402/413/422 never retry — the request itself is the problem.
 RETRIABLE = frozenset({429, 500, 502, 503, 529})
 
+# A server that rejects a request without reading the body (bad key, exhausted
+# quota, oversized file) closes the connection while the client is still
+# sending, and urllib surfaces the resulting EPIPE instead of the response.
+# Retrying repeats the same failure, so say what it usually means instead.
+EARLY_CLOSE = (
+    "{service} closed the connection before the upload finished. That "
+    "usually means the request was rejected without reading the document — "
+    "most often an invalid API key, sometimes an exhausted quota or an "
+    "oversized file. Check the key in Easting settings; if it keeps "
+    "happening, email support@easting.ai."
+)
+
 
 def post_with_retries(
     url: str,
@@ -63,12 +75,18 @@ def post_with_retries(
                 continue
             raise ExtractionError(f"{service} returned error {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
+            if isinstance(exc.reason, (BrokenPipeError, ConnectionResetError)):
+                raise ExtractionError(EARLY_CLOSE.format(service=service)) from exc
             if attempt < max_retries:
                 last_err = exc
                 time.sleep(delay)
                 delay *= 2
                 continue
             raise ExtractionError(f"Network error reaching {service}: {exc.reason}") from exc
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            # Not always wrapped in URLError, depending on where the socket
+            # write fails.
+            raise ExtractionError(EARLY_CLOSE.format(service=service)) from exc
     raise ExtractionError(f"API request failed after {max_retries + 1} attempts: {last_err}")
 
 

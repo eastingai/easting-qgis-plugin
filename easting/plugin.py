@@ -13,7 +13,7 @@ from ._vendor.groundtruth_core.model import Tract
 from ._vendor.groundtruth_core.result import ExtractionResult
 from ._vendor.groundtruth_core.served import ServerVerdict
 from .extract_task import ExtractTask
-from .layers import place_georeferenced_tract, place_tract, save_geopackage
+from .layers import place_georeferenced_tract, place_group, place_tract, save_geopackage
 from .place_tool import PlacePobTool
 from .review_dock import ReviewDock
 from .settings_dialog import SettingsDialog, get_api_url, get_service_key
@@ -29,6 +29,7 @@ class EastingPlugin:
         self._source_doc = ""
         self._active_tract: Tract | None = None
         self._active_verdict: ServerVerdict | None = None
+        self._active_group: list | None = None  # [(Tract, ServerVerdict), ...]
         self._placed_layers: list = []
         self._actions: list[QAction] = []
         self._toolbar = None
@@ -107,6 +108,7 @@ class EastingPlugin:
         if self._dock is None:
             self._dock = ReviewDock(self.iface.mainWindow())
             self._dock.place_requested.connect(self._start_placement)
+            self._dock.group_place_requested.connect(self._start_group_placement)
             self._dock.place_georef_requested.connect(self._place_georef)
             self._dock.rotation_changed.connect(self._on_rotation)
             self._dock.place_confirmed.connect(self._confirm_placement)
@@ -169,6 +171,7 @@ class EastingPlugin:
 
         self._active_tract = tract
         self._active_verdict = verdict
+        self._active_group = None
         factor = QgsUnitTypes.fromUnitToUnitFactor(
             QgsUnitTypes.DistanceUnit.DistanceFeet, crs.mapUnits()
         )
@@ -192,7 +195,66 @@ class EastingPlugin:
         if self._tool is not None:
             self._tool.set_rotation(degrees)
 
+    def _start_group_placement(self, pairs: list) -> None:
+        """One click on the shared commencement monument places every tract."""
+        crs = QgsProject.instance().crs()
+        if crs.isGeographic():
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Easting",
+                "The project CRS is geographic (degrees). Switch the project to a "
+                "projected CRS (for example the UTM zone or State Plane of the parcel) "
+                "before placing, so distances in feet stay meaningful.",
+            )
+            return
+
+        self._active_tract = None
+        self._active_verdict = None
+        self._active_group = pairs
+        factor = QgsUnitTypes.fromUnitToUnitFactor(
+            QgsUnitTypes.DistanceUnit.DistanceFeet, crs.mapUnits()
+        )
+        rings = [(v.tie_offset, v.geometry.vertices) for _, v in pairs]
+        self._release_tool()
+        self._tool = PlacePobTool.for_group(self.iface.mapCanvas(), rings, factor)
+        self._tool.pob_picked.connect(
+            lambda _: self.iface.messageBar().pushMessage(
+                "Easting",
+                "Commencement point set. Adjust rotation in the dock, then Confirm placement.",
+                level=Qgis.MessageLevel.Info,
+            )
+        )
+        self.iface.mapCanvas().setMapTool(self._tool)
+        self.iface.messageBar().pushMessage(
+            "Easting",
+            f"Click the tracts' shared commencement point to preview all {len(pairs)}.",
+            level=Qgis.MessageLevel.Info,
+        )
+
     def _confirm_placement(self) -> None:
+        if self._tool is not None and self._tool.pob() is not None and self._active_group:
+            placed = place_group(
+                pairs=self._active_group,
+                anchor=self._tool.pob(),
+                crs=QgsProject.instance().crs(),
+                rotation_deg=self._tool.rotation(),
+                source_doc=self._source_doc,
+                metadata=getattr(self._result.extraction, "metadata", None) if self._result else None,
+            )
+            count = 0
+            for poly, lines in placed:
+                QgsProject.instance().addMapLayers([poly, lines])
+                self._placed_layers.extend([poly, lines])
+                count += 1
+            self._active_group = None
+            self._release_tool()
+            self.iface.messageBar().pushMessage(
+                "Easting",
+                f"Placed {count} tracts from their shared commencement point.",
+                level=Qgis.MessageLevel.Success,
+            )
+            return
+
         if self._tool is None or self._tool.pob() is None or self._active_tract is None:
             QMessageBox.information(
                 self.iface.mainWindow(), "Easting", "Click the POB on the map first."

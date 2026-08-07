@@ -66,6 +66,15 @@ class GeorefGeometry:
         )
 
 
+def _offset_of(raw: Any) -> tuple[float, float] | None:
+    """Parse [east_ft, north_ft] defensively; anything malformed is None."""
+    try:
+        x, y = raw  # type: ignore[misc]
+        return (float(x), float(y))
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class ServerVerdict:
     """One tract's GroundTruth verdict, index-aligned with `extraction.tracts`."""
@@ -75,12 +84,24 @@ class ServerVerdict:
     reasons: list[str] = field(default_factory=list)
     closure_ratio: str | None = None
     computed_acres: float | None = None
+    # Present from 0.5+; small easements are verified in square feet.
+    computed_sqft: float | None = None
     # None when the tract could not be traversed at all, which is exactly the
     # case where placement must be refused.
     geometry: TractGeometry | None = None
     # Present on aliquot verdicts from 0.4+ servers; .get() keeps older
     # responses parsing. When set, the plugin can place without a POB click.
     georef: GeorefGeometry | None = None
+    # Present from 0.5+ servers: where this tract's POB sits relative to its
+    # commencement monument ([east_ft, north_ft]), and which monument that
+    # is. Tracts sharing an anchor place as a group with one click.
+    tie_offset: tuple[float, float] | None = None
+    anchor: str | None = None
+
+    @property
+    def groupable(self) -> bool:
+        """This tract can join a one-click placement group."""
+        return self.placeable and self.tie_offset is not None and self.anchor is not None
 
     @property
     def passed(self) -> bool:
@@ -102,6 +123,9 @@ class ServerVerdict:
             computed_acres=(
                 None if d.get("computed_acres") is None else float(d["computed_acres"])
             ),
+            computed_sqft=(None if d.get("computed_sqft") is None else float(d["computed_sqft"])),
             geometry=TractGeometry.from_dict(geometry) if geometry else None,
             georef=GeorefGeometry.from_dict(georef) if georef else None,
+            tie_offset=_offset_of(d.get("tie_offset")),
+            anchor=(str(d["anchor"]) if d.get("anchor") else None),
         )
