@@ -45,6 +45,8 @@ class ReviewDock(QDockWidget):
     group_place_requested = pyqtSignal(list)
     place_georef_requested = pyqtSignal(object, object)  # (Tract, Verdict) — no POB click
     save_requested = pyqtSignal()
+    dxf_requested = pyqtSignal()
+    certificate_requested = pyqtSignal()
     rotation_changed = pyqtSignal(float)
     place_confirmed = pyqtSignal()
 
@@ -53,6 +55,7 @@ class ReviewDock(QDockWidget):
         self.setObjectName("EastingReviewDock")
         self._result: ExtractionResult | None = None
         self._source_doc = ""
+        self._batch_card = None
 
         self._container = QWidget()
         self._layout = QVBoxLayout(self._container)
@@ -93,17 +96,35 @@ class ReviewDock(QDockWidget):
             notes.setStyleSheet(notes_style())
             self._layout.addWidget(notes)
 
+        # Plats and as-builts are identified rather than traced, so their
+        # judgement arrives as one document-level verdict instead of a per-tract
+        # array. Render it before the generic no-description message, which
+        # would otherwise be the only thing these documents ever showed.
+        document_verdict = getattr(result, "document_verdict", None)
+        if document_verdict is not None:
+            self._layout.addWidget(_document_banner(document_verdict))
+        if ex.plat is not None:
+            self._layout.addWidget(_plat_card(ex.plat))
+        if ex.as_built is not None:
+            self._layout.addWidget(_asbuilt_card(ex.as_built))
+
         if not ex.legal_description_found or not ex.tracts:
-            msg = QLabel(
-                "No locatable description found in this document. Deeds and "
-                "easements describe land by courses or by PLSS chains; "
-                "lot-and-block conveyances and easement areas that live only "
-                "on an attached drawing are recorded in the metadata above "
-                "rather than drawn."
-            )
-            msg.setWordWrap(True)
-            msg.setStyleSheet(f"color:{verdict_text_color('FAIL')}; font-weight:bold;")
-            self._layout.addWidget(msg)
+            if document_verdict is None:
+                msg = QLabel(
+                    "No locatable description found in this document. Deeds and "
+                    "easements describe land by courses or by PLSS chains; "
+                    "lot-and-block conveyances and easement areas that live only "
+                    "on an attached drawing are recorded in the metadata above "
+                    "rather than drawn."
+                )
+                msg.setWordWrap(True)
+                msg.setStyleSheet(f"color:{verdict_text_color('FAIL')}; font-weight:bold;")
+                self._layout.addWidget(msg)
+            if document_verdict is not None:
+                # A plat or an as-built has no tracts and never reaches the
+                # controls row below, but its identification is exactly what
+                # the certificate exists to put on paper.
+                self._layout.addWidget(self._certificate_button())
             return
 
         # A composite conveyance ties every tract to one commencement
@@ -119,9 +140,7 @@ class ReviewDock(QDockWidget):
             # Anchors are the document's own monument text and can run long;
             # elide on the button, keep the full text where a hover finds it.
             shown = anchor if len(anchor) <= 44 else anchor[:43].rstrip() + "…"
-            button = QPushButton(
-                f"Place all {len(pairs)} tracts as a group — click: {shown}"
-            )
+            button = QPushButton(f"Place all {len(pairs)} tracts as a group — click: {shown}")
             button.setToolTip(f"Shared commencement point: {anchor}")
             button.clicked.connect(lambda _, p=pairs: self.group_place_requested.emit(p))
             self._layout.addWidget(button)
@@ -148,6 +167,19 @@ class ReviewDock(QDockWidget):
         save = QPushButton("Save GeoPackage…")
         save.clicked.connect(self.save_requested.emit)
         row.addWidget(save)
+        dxf = QPushButton("Save DXF…")
+        dxf.clicked.connect(self.dxf_requested.emit)
+        # The server answers 422 when no tract has geometry, so disable rather
+        # than let someone click into a refusal they could have been spared.
+        placeable = any(v.placeable for v in result.verdicts)
+        dxf.setEnabled(placeable)
+        dxf.setToolTip(
+            "Export the traverse as a CAD drawing (unplaced: point of "
+            "beginning at the origin, feet)."
+            if placeable
+            else "No tract in this document has computed geometry to draw."
+        )
+        row.addWidget(self._certificate_button())
         copy_btn = QPushButton("Copy JSON")
         copy_btn.clicked.connect(self._copy_json)
         row.addWidget(copy_btn)
@@ -217,12 +249,7 @@ class ReviewDock(QDockWidget):
         if verdict.geometry is not None:
             ratio = verdict.closure_ratio
             closure = "closes exactly" if ratio == "exact" else f"closure {ratio}"
-            sqft = getattr(verdict, "computed_sqft", None)
-            if getattr(tract, "stated_area_sqft", None) and sqft:
-                computed = f"computed {sqft:,.0f} sq ft"
-            else:
-                computed = f"computed {verdict.geometry.acres:.3f} ac"
-            self._layout.addWidget(QLabel(f"{closure} · {computed}"))
+            self._layout.addWidget(QLabel(f"{closure} · {_computed_area_text(tract, verdict)}"))
         for reason in verdict.reasons:
             lbl = QLabel(f"• {reason}")
             lbl.setWordWrap(True)
@@ -239,14 +266,14 @@ class ReviewDock(QDockWidget):
                 header = QLabel("Centerline courses — the strip follows this line")
                 header.setStyleSheet(f"color:{secondary_text()}; font-size:11px;")
                 self._layout.addWidget(header)
-            self._layout.addWidget(self._call_table(tract.calls))
+            self._layout.addWidget(self._call_table(tract.calls, _unit_of(tract)))
 
         tie_calls = getattr(tract, "tie_calls", None) or []
         if tie_calls:
             tie_label = QLabel(f"Tie courses ({len(tie_calls)}) — not part of the boundary")
             tie_label.setStyleSheet(f"color:{secondary_text()}; font-size:11px;")
             self._layout.addWidget(tie_label)
-            self._layout.addWidget(self._call_table(tie_calls))
+            self._layout.addWidget(self._call_table(tie_calls, _unit_of(tract)))
 
         aliquot = getattr(tract, "aliquot", None)
         if aliquot is not None:
@@ -267,12 +294,38 @@ class ReviewDock(QDockWidget):
             place.clicked.connect(lambda _, t=tract, v=verdict: self.place_requested.emit(t, v))
             self._layout.addWidget(place)
 
-    def _call_table(self, calls) -> QTableWidget:
+    def _certificate_button(self) -> QPushButton:
+        """Always enabled, unlike the DXF button.
+
+        A tract that refuses to locate itself still certifies the refusal, and
+        a plat certifies its identification, so there is no client-side test
+        for "nothing to certify" worth guessing at. The one document that has
+        nothing at all to say is refused by the service, with the reason.
+        """
+        button = QPushButton("Save certificate…")
+        button.clicked.connect(self.certificate_requested.emit)
+        button.setToolTip(
+            "Save the GroundTruth Certificate of Digitization: verdicts with "
+            "reasons, closure, areas in the document's own unit, and every "
+            "course with its verbatim source text."
+        )
+        return button
+
+    def _call_table(self, calls, unit: str = "feet") -> QTableWidget:
         """One renderer for boundary and tie courses; the adjoiner column
-        stays blank on calls that run with nothing."""
+        stays blank on calls that run with nothing.
+
+        Distances are the document's own numbers, so the column says which
+        unit those numbers are in. A table of metric courses labelled plainly
+        "dist" is the kind of thing a reviewer only notices after trusting it.
+        """
         table = QTableWidget(len(calls), 7)
+        heading = "dist" if unit == "feet" else f"dist ({UNIT_LABELS.get(unit, unit)})"
         table.setHorizontalHeaderLabels(
-            ["#", "type", "bearing", "dist", "conf", "adjoiner", "verbatim"]
+            ["#", "type", "bearing", heading, "conf", "adjoiner", "verbatim"]
+        )
+        table.horizontalHeaderItem(3).setToolTip(
+            f"Distances as recorded, in {unit}. Placed geometry is converted for you."
         )
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -300,6 +353,24 @@ class ReviewDock(QDockWidget):
         table.setMaximumHeight(min(220, 40 + 30 * len(calls)))
         return table
 
+    # -- batch progress ------------------------------------------------------
+    def show_batch_progress(self, settled: int, total: int) -> None:
+        """Report a running batch at the top of the dock.
+
+        Kept out of `_clear`'s way by living in its own slot: a batch can still
+        be settling while the user reviews a document from an earlier one.
+        """
+        self.clear_batch_progress()
+        self._batch_card = _progress_card(settled, total)
+        self._layout.insertWidget(0, self._batch_card)
+        self.show()
+
+    def clear_batch_progress(self) -> None:
+        card = getattr(self, "_batch_card", None)
+        if card is not None:
+            card.deleteLater()
+            self._batch_card = None
+
     # -- helpers -------------------------------------------------------------
     def rotation_value(self) -> float:
         return self._rotation.value() if hasattr(self, "_rotation") else 0.0
@@ -309,22 +380,64 @@ class ReviewDock(QDockWidget):
             QApplication.clipboard().setText(json.dumps(asdict(self._result.extraction), indent=2))
 
     def _clear(self) -> None:
+        self._batch_card = None
         while self._layout.count():
             item = self._layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
 
+# How the document's distance unit reads in a column heading or a tooltip.
+UNIT_LABELS = {"feet": "ft", "meters": "m", "varas": "varas", "chains": "chains"}
+
+
+def _unit_of(tract) -> str:
+    return getattr(tract, "distance_unit", None) or "feet"
+
+
 def _stated_area_text(tract) -> str:
-    """Report the area the document stated, in the document's own unit. Small
-    easements are stated in square feet, where acres round too coarsely to
-    mean anything."""
+    """Report the area the document stated, in the document's own unit.
+
+    Small easements are stated in square feet, where acres round too coarsely
+    to mean anything, and a metric survey states square meters or hectares.
+    The order matches the server's: whichever figure the verdict compared
+    against is the one shown here.
+    """
+    sqm = getattr(tract, "stated_area_sqm", None)
+    hectares = getattr(tract, "stated_hectares", None)
     sqft = getattr(tract, "stated_area_sqft", None)
+    if sqm:
+        return f" · stated {sqm:,.0f} m²"
+    if hectares:
+        return f" · stated {hectares:g} ha"
     if sqft:
         return f" · stated {sqft:,.0f} sq ft"
     if tract.stated_acreage:
         return f" · stated {tract.stated_acreage} ac"
     return ""
+
+
+def _computed_area_text(tract, verdict) -> str:
+    """The computed area, in the unit this document would state it in.
+
+    A metric document gets a metric answer whether or not it stated an area:
+    handing a Dutch plan "0.494 ac" would make the reviewer do the conversion
+    the server already did. Hectares take over above one, where square meters
+    stop being readable.
+    """
+    sqm = getattr(verdict, "computed_sqm", None)
+    hectares = getattr(verdict, "computed_hectares", None)
+    sqft = getattr(verdict, "computed_sqft", None)
+    metric_document = getattr(verdict, "distance_unit", "feet") == "meters"
+    if (getattr(tract, "stated_area_sqm", None) or metric_document) and sqm:
+        if hectares and hectares >= 1:
+            return f"computed {hectares:,.4f} ha"
+        return f"computed {sqm:,.1f} m²"
+    if getattr(tract, "stated_hectares", None) and hectares:
+        return f"computed {hectares:,.4f} ha"
+    if getattr(tract, "stated_area_sqft", None) and sqft:
+        return f"computed {sqft:,.0f} sq ft"
+    return f"computed {verdict.geometry.acres:.3f} ac"
 
 
 def _easement_card(easement) -> QLabel:
@@ -351,4 +464,92 @@ def _easement_card(easement) -> QLabel:
     label.setTextFormat(Qt.TextFormat.RichText)
     label.setWordWrap(True)
     label.setStyleSheet(f"color:{secondary_text()}; font-size:11px;")
+    return label
+
+
+def _document_banner(verdict) -> QLabel:
+    """The verdict on a document that produced no tracts.
+
+    A plat or an as-built has nothing to place, so this banner is the whole
+    result for those documents. It leads with what the sheet is, then says what
+    could not be verified, because "REVIEW" without a reason is not a finding.
+    """
+    lines = [f"<b>{verdict.document or 'Document'} · {verdict.status}</b>"]
+    if verdict.summary:
+        lines.append(verdict.summary)
+    for reason in verdict.reasons:
+        lines.append(f"• {reason}")
+    label = QLabel("<br>".join(lines))
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setWordWrap(True)
+    label.setStyleSheet(notes_style())
+    return label
+
+
+def _plat_card(plat) -> QLabel:
+    """A recorded plat as a title searcher reads it: which subdivision, which
+    lots, and where it is recorded so it can be cited."""
+    bits = []
+    if plat.subdivision:
+        bits.append(f"<b>{plat.subdivision}</b>")
+    if plat.lots:
+        bits.append(f"Lot{'s' if len(plat.lots) > 1 else ''} {', '.join(plat.lots)}")
+    if plat.blocks:
+        bits.append(f"Block {', '.join(plat.blocks)}")
+    lines = [" · ".join(bits)] if bits else ["Plat"]
+    if plat.recording is not None:
+        text = plat.recording.text()
+        if text:
+            lines.append(f"Recorded: {text}")
+    if plat.surveyor:
+        lines.append(f"Surveyor: {plat.surveyor}")
+    if plat.date:
+        lines.append(f"Dated: {plat.date}")
+    return _card(lines)
+
+
+def _asbuilt_card(sheet) -> QLabel:
+    """A utility as-built in the order an engineer checks it: whose system,
+    what utility, and from when, because vintage decides how far to trust the
+    rest of the sheet."""
+    bits = []
+    if sheet.utility:
+        bits.append(f"<b>{sheet.utility.title()}</b>")
+    if sheet.agency:
+        bits.append(sheet.agency)
+    if sheet.vintage:
+        bits.append(sheet.vintage)
+    lines = [" · ".join(bits)] if bits else ["As-built"]
+    if sheet.engineer:
+        lines.append(f"Engineer: {sheet.engineer}")
+    if sheet.stationing:
+        lines.append(f"Stationing: {sheet.stationing}")
+    if sheet.pipe:
+        lines.append(f"Pipe: {sheet.pipe}")
+    if sheet.sheets:
+        lines.append(f"Sheets: {sheet.sheets}")
+    return _card(lines)
+
+
+def _card(lines: list[str]) -> QLabel:
+    label = QLabel("<br>".join(lines))
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setWordWrap(True)
+    label.setStyleSheet(f"color:{secondary_text()}; font-size:11px;")
+    return label
+
+
+def _progress_card(settled: int, total: int) -> QLabel:
+    """How far a submitted batch has got, in documents rather than percent.
+
+    A batch runs for minutes to hours, so the useful question is "how many are
+    done", not "what fraction of a bar is filled".
+    """
+    label = QLabel(
+        f"<b>Batch running</b> · {settled} of {total} documents settled.<br>"
+        "You can keep working; results load here when the batch finishes."
+    )
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setWordWrap(True)
+    label.setStyleSheet(notes_style())
     return label

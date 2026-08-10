@@ -1,5 +1,6 @@
 # Easting QGIS plugin
 
+The QGIS client for [Easting](https://easting.ai), verified deed digitization.
 Turn recorded metes-and-bounds deeds into validated parcel geometry, inside
 QGIS. A vision model reads the deed and returns every boundary call with its
 verbatim source text; deterministic software then recomputes the traverse,

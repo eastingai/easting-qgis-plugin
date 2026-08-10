@@ -9,14 +9,27 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QFileDialog, QMessageBox
 
+from ._vendor.groundtruth_core.hosted import fetch_certificate, fetch_dxf
 from ._vendor.groundtruth_core.model import Tract
-from ._vendor.groundtruth_core.result import ExtractionResult
+from ._vendor.groundtruth_core.result import ExtractionError, ExtractionResult
 from ._vendor.groundtruth_core.served import ServerVerdict
+from .batch_task import BatchTask
 from .extract_task import ExtractTask
 from .layers import place_georeferenced_tract, place_group, place_tract, save_geopackage
 from .place_tool import PlacePobTool
 from .review_dock import ReviewDock
 from .settings_dialog import SettingsDialog, get_api_url, get_service_key
+
+# Recorder offices hand out more than PDF: TIFF is the archival native at
+# register-of-deeds offices, and a photographed document is a JPEG. The service
+# converts them on arrival, so the only thing the plugin needs is to stop
+# filtering them out of the picker.
+DOCUMENT_SUFFIXES = frozenset({".pdf", ".tif", ".tiff", ".png", ".jpg", ".jpeg"})
+DOCUMENT_FILTER = (
+    "Recorded documents (*.pdf *.tif *.tiff *.png *.jpg *.jpeg);;"
+    "PDF documents (*.pdf);;"
+    "Scanned images (*.tif *.tiff *.png *.jpg *.jpeg)"
+)
 
 
 class EastingPlugin:
@@ -32,6 +45,9 @@ class EastingPlugin:
         self._active_group: list | None = None  # [(Tract, ServerVerdict), ...]
         self._placed_layers: list = []
         self._actions: list[QAction] = []
+        self._batch_task = None
+        # Documents from a settled batch waiting their turn in the dock.
+        self._batch_queue: list = []
         self._toolbar = None
 
     # -- QGIS lifecycle ------------------------------------------------------
@@ -54,12 +70,24 @@ class EastingPlugin:
         self._toolbar.addAction(extract)
         self.iface.addPluginToMenu("Easting", extract)
 
+        folder = QAction(icon, "Extract folder…", self.iface.mainWindow())
+        folder.setToolTip(
+            "Extract every PDF in a folder as one batch. Results arrive "
+            "together, usually within the hour."
+        )
+        folder.triggered.connect(self.run_batch)
+        self._toolbar.addAction(folder)
+        self.iface.addPluginToMenu("Easting", folder)
+
         settings = QAction("Settings…", self.iface.mainWindow())
         settings.triggered.connect(self.show_settings)
         self._toolbar.addAction(settings)
         self.iface.addPluginToMenu("Easting", settings)
 
-        self._actions = [extract, settings]
+        # Every action this plugin owns, so unload takes all of them off a
+        # toolbar that siblings also live on. Forgetting one leaves a dead
+        # button behind after the plugin is disabled.
+        self._actions = [extract, folder, settings]
 
     def unload(self) -> None:
         for action in self._actions:
@@ -89,7 +117,10 @@ class EastingPlugin:
                 return
 
         path, _ = QFileDialog.getOpenFileName(
-            self.iface.mainWindow(), "Select deed PDF", "", "PDF documents (*.pdf)"
+            self.iface.mainWindow(),
+            "Select a recorded document",
+            "",
+            DOCUMENT_FILTER,
         )
         if not path:
             return
@@ -113,10 +144,183 @@ class EastingPlugin:
             self._dock.rotation_changed.connect(self._on_rotation)
             self._dock.place_confirmed.connect(self._confirm_placement)
             self._dock.save_requested.connect(self._save_gpkg)
+            self._dock.dxf_requested.connect(self._save_dxf)
+            self._dock.certificate_requested.connect(self._save_certificate)
             self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock)
         self._dock.show_result(result, self._source_doc)
         self._dock.show()
         self._dock.raise_()
+
+    def run_batch(self) -> None:
+        """Extract every PDF in a folder as one batch.
+
+        Batch trades latency for cost and for scale: the whole folder goes up
+        in one request and the results come back together. The server admits
+        the batch whole or refuses it whole, so a 402 here means nothing was
+        submitted and nothing was billed.
+        """
+        api_key, api_url = get_service_key(), get_api_url()
+        if not api_key or not api_url:
+            self.show_settings()
+            api_key, api_url = get_service_key(), get_api_url()
+            if not api_key or not api_url:
+                return
+
+        directory = QFileDialog.getExistingDirectory(
+            self.iface.mainWindow(), "Select a folder of deed PDFs"
+        )
+        if not directory:
+            return
+
+        found = sorted(
+            p for p in Path(directory).iterdir() if p.suffix.lower() in DOCUMENT_SUFFIXES
+        )
+        if not found:
+            QMessageBox.information(
+                self.iface.mainWindow(),
+                "Easting",
+                "No documents in that folder. Easting reads PDF, TIFF, PNG, and JPEG.",
+            )
+            return
+
+        documents = [(path.name, path.read_bytes()) for path in found]
+        confirm = QMessageBox.question(
+            self.iface.mainWindow(),
+            "Easting",
+            f"Extract {len(documents)} documents as one batch?\n\n"
+            "They count against your quota when they succeed. Failed "
+            "documents are never billed.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        self._batch_task = BatchTask(documents, api_url=api_url, api_key=api_key)
+        self._batch_task.submitted.connect(self._on_batch_submitted)
+        self._batch_task.progress_changed.connect(self._on_batch_progress)
+        self._batch_task.completed.connect(self._on_batch_completed)
+        self._batch_task.failed.connect(self._on_failed)
+        QgsApplication.taskManager().addTask(self._batch_task)
+
+    def _on_batch_submitted(self, batch_id: str, count: int) -> None:
+        self.iface.messageBar().pushMessage(
+            "Easting",
+            f"Batch {batch_id} submitted: {count} documents. Results usually "
+            "arrive within the hour; you can keep working.",
+            level=Qgis.MessageLevel.Info,
+        )
+
+    def _on_batch_progress(self, settled: int, total: int) -> None:
+        if self._dock is not None:
+            self._dock.show_batch_progress(settled, total)
+
+    def _on_batch_completed(self, results: list) -> None:
+        """Load the batch into the ordinary review flow, one document at a time.
+
+        Reviewing is a per-document act, so a settled batch does not get its
+        own surface: the first result opens in the dock exactly as a single
+        extraction would, and the rest queue behind it.
+        """
+        succeeded = [(name, result) for name, result, error in results if result is not None]
+        failures = [(name, error) for name, result, error in results if result is None]
+        self._batch_queue = succeeded[1:]
+        if self._dock is not None:
+            self._dock.clear_batch_progress()
+
+        if failures:
+            listed = "\n".join(f"· {name}: {error}" for name, error in failures[:8])
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Easting",
+                f"{len(failures)} of {len(results)} documents did not extract "
+                f"(these were not billed):\n\n{listed}",
+            )
+        if not succeeded:
+            return
+
+        name, result = succeeded[0]
+        self._source_doc = name
+        self._on_extracted(result)
+        if self._batch_queue:
+            self.iface.messageBar().pushMessage(
+                "Easting",
+                f"{len(succeeded)} documents extracted. Showing {name}; "
+                f"{len(self._batch_queue)} more are ready in this batch.",
+                level=Qgis.MessageLevel.Success,
+            )
+
+    def _save_dxf(self) -> None:
+        """Convert the extraction to a CAD drawing, server-side.
+
+        The retained response payload goes back up rather than a
+        re-serialization of the parsed model: the server reads keys this
+        plugin version may not know about.
+        """
+        if self._result is None:
+            return
+        payload = getattr(self._result, "raw", None)
+        if not payload:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Easting",
+                "This extraction predates DXF export. Re-run it to save a drawing.",
+            )
+            return
+
+        default = (self._source_doc.rsplit(".", 1)[0] or "extraction") + ".dxf"
+        path, _ = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(), "Save DXF", default, "DXF drawings (*.dxf)"
+        )
+        if not path:
+            return
+        try:
+            drawing = fetch_dxf(get_api_url(), get_service_key(), payload)
+        except ExtractionError as exc:
+            QMessageBox.warning(self.iface.mainWindow(), "Easting", str(exc))
+            return
+        Path(path).write_bytes(drawing)
+        self.iface.messageBar().pushMessage(
+            "Easting",
+            f"Saved {Path(path).name}. The drawing is unplaced: point of "
+            "beginning at the origin, distances in feet.",
+            level=Qgis.MessageLevel.Success,
+        )
+
+    def _save_certificate(self) -> None:
+        """Ask the service for the certificate PDF this extraction supports.
+
+        The retained payload goes back up untouched. The service verifies a
+        signature over the response exactly as it returned it, so a rebuild
+        from the parsed model would come back refused as modified.
+        """
+        if self._result is None:
+            return
+        payload = getattr(self._result, "raw", None)
+        if not payload:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Easting",
+                "This extraction predates the certificate. Re-run it to save one.",
+            )
+            return
+
+        default = (self._source_doc.rsplit(".", 1)[0] or "extraction") + "-certificate.pdf"
+        path, _ = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(), "Save certificate", default, "PDF documents (*.pdf)"
+        )
+        if not path:
+            return
+        try:
+            document = fetch_certificate(get_api_url(), get_service_key(), payload)
+        except ExtractionError as exc:
+            QMessageBox.warning(self.iface.mainWindow(), "Easting", str(exc))
+            return
+        Path(path).write_bytes(document)
+        self.iface.messageBar().pushMessage(
+            "Easting",
+            f"Saved {Path(path).name}. Every course carries its source text, "
+            "and the footer's verification code ties the paper to the extraction.",
+            level=Qgis.MessageLevel.Success,
+        )
 
     def _place_georef(self, tract: Tract, verdict: ServerVerdict) -> None:
         """Aliquot tracts arrive located: no POB click, no rotation."""
@@ -239,7 +443,9 @@ class EastingPlugin:
                 crs=QgsProject.instance().crs(),
                 rotation_deg=self._tool.rotation(),
                 source_doc=self._source_doc,
-                metadata=getattr(self._result.extraction, "metadata", None) if self._result else None,
+                metadata=(
+                    getattr(self._result.extraction, "metadata", None) if self._result else None
+                ),
             )
             count = 0
             for poly, lines in placed:

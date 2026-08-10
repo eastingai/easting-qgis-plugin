@@ -10,6 +10,7 @@ Easting service.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -379,18 +380,27 @@ class Tract:
     description_type: str = "metes_and_bounds"
     # Documents state small easement areas in square feet, and three decimals
     # of acreage is coarser than the acreage tolerance at that size, so the
-    # document's own unit has to survive.
+    # document's own unit has to survive. The same argument in metric: a
+    # Canadian plan stating "0.185 ha" or a survey stating "4,998 m²" has its
+    # own figure, and converting it to acres before comparing would compare
+    # against our arithmetic instead of the document's.
     stated_area_sqft: float | None = None
+    stated_area_sqm: float | None = None
+    stated_hectares: float | None = None
     easement: EasementDescription | None = None
     aliquot: AliquotDescription | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Tract:
+        # All four areas cross the model's wire inside one STATED_AREA_FORMAT
+        # string; the split numeric keys are what ground truth files, the
+        # plat-table pass, and every stored response use, so both parse.
+        areas = parse_stated_area_wire(d.get("stated_area"))
         return cls(
             name=d.get("name") or "TRACT 1",
             pob_description=d.get("pob_description") or "",
             calls=[Call.from_dict(c) for c in d.get("calls") or []],
-            stated_acreage=_opt_float(d.get("stated_acreage")),
+            stated_acreage=_opt_float(d.get("stated_acreage")) or areas.get("acres"),
             distance_unit=d.get("distance_unit") or "feet",
             is_exception=bool(d.get("is_exception") or False),
             tie_calls=[
@@ -398,7 +408,9 @@ class Tract:
                 for c in d.get("tie_calls") or []
             ],
             description_type=d.get("description_type") or "metes_and_bounds",
-            stated_area_sqft=_opt_float(d.get("stated_area_sqft")),
+            stated_area_sqft=_opt_float(d.get("stated_area_sqft")) or areas.get("sqft"),
+            stated_area_sqm=_opt_float(d.get("stated_area_sqm")) or areas.get("sqm"),
+            stated_hectares=_opt_float(d.get("stated_hectares")) or areas.get("ha"),
             easement=_easement_of(d.get("easement")),
             aliquot=_parse_aliquot_value(d.get("aliquot")),
         )
@@ -414,18 +426,38 @@ class DeedExtraction:
     # Nullable so a pre-metadata server's response still parses; .get() keeps
     # old plugins working against a new server the same way.
     metadata: DeedMetadata | None = None
+    # Document-level, and mutually exclusive: a sheet is a plat or an
+    # as-built, never both. They sit here rather than on Tract because neither
+    # class produces tracts. A recorded plat's boundary lives in its linework,
+    # which needs a scan we cannot count on reading, and an as-built has no
+    # coordinate basis at all.
+    #
+    # Both parse from ONE wire field (`sheet`), dispatched on document_kind,
+    # because the structured-outputs grammar had room for exactly one more
+    # document-level string. See the note on `sheet` in DEED_JSON_SCHEMA.
+    plat: PlatDescription | None = None
+    as_built: AsBuiltDescription | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> DeedExtraction:
         metadata = d.get("metadata")
         parsed = DeedMetadata.from_dict(metadata) if metadata else None
+        kind = d.get("document_kind") or "other"
+        # Accept the split field names too: ground truth files and tests are
+        # easier to read when they say which class they mean, and a caller
+        # that names one explicitly should not have to also set document_kind.
+        sheet = d.get("sheet") or ""
+        plat_wire = d.get("plat") or (sheet if kind == "plat" else "")
+        asbuilt_wire = d.get("as_built") or (sheet if kind == "as_built" else "")
         return cls(
-            document_kind=d.get("document_kind") or "other",
+            document_kind=kind,
             legal_description_found=bool(d.get("legal_description_found")),
             tracts=[Tract.from_dict(t) for t in d.get("tracts") or []],
             basis_of_bearings=d.get("basis_of_bearings"),
             notes=d.get("notes"),
             metadata=None if parsed is None or parsed.is_empty() else parsed,
+            plat=parse_plat_wire(plat_wire),
+            as_built=parse_asbuilt_wire(asbuilt_wire),
         )
 
 
@@ -487,6 +519,92 @@ LOT_BLOCK_FORMAT = (
 # Tie courses ride flat too (display-only, so a lossy parse costs a table
 # row, not geometry). Bearing is "N <deg> <min> <sec> E" style.
 TIE_FORMAT = "bearing=<N 00 15 05.0 E> | distance=<318.60> | verbatim=<the course text>"
+
+# Every area a tract states, in one string. Four separate numbers do not fit
+# the grammar (probed 2026-08-09: the schema had no room for even one more
+# field of any type), and folding the two that already existed into this
+# string is what bought the room for metric. Only the units the document
+# actually prints appear; nothing here is ever converted from another unit,
+# because the whole point of the field is to compare against the document's
+# own figure.
+STATED_AREA_FORMAT = "acres=<0.17> | sqft=<7405> | sqm=<688.0> | ha=<0.0688>"
+
+_AREA_KEYS = {
+    "acres": "acres",
+    "acre": "acres",
+    "ac": "acres",
+    "sqft": "sqft",
+    "sq_ft": "sqft",
+    "square_feet": "sqft",
+    "sqm": "sqm",
+    "sq_m": "sqm",
+    "m2": "sqm",
+    "square_meters": "sqm",
+    "ha": "ha",
+    "hectares": "ha",
+}
+
+# The same units as words, for the fallback below. Keys are the unit text with
+# punctuation and spaces stripped, so "SQ. FT." and "sq ft" both land on sqft.
+_AREA_UNIT_WORDS = {
+    "acres": "acres",
+    "acre": "acres",
+    "ac": "acres",
+    "sqft": "sqft",
+    "squarefeet": "sqft",
+    "squarefoot": "sqft",
+    "sf": "sqft",
+    "sqm": "sqm",
+    "squaremeters": "sqm",
+    "squaremetres": "sqm",
+    "m2": "sqm",
+    "m²": "sqm",
+    "ha": "ha",
+    "hectare": "ha",
+    "hectares": "ha",
+}
+
+_AREA_PHRASE_RE = re.compile(
+    r"([\d,]+(?:\.\d+)?)\s*"
+    r"(acres?|ac|sq\.?\s*ft\.?|square\s+f(?:ee|oo)t|sf|sq\.?\s*m|square\s+met(?:er|re)s?|"
+    r"m2|m²|hectares?|ha)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_stated_area_wire(raw: Any) -> dict[str, float]:
+    """Stated areas from the wire string, keyed acres/sqft/sqm/ha.
+
+    Missing or unreadable segments are simply absent: a figure nobody can read
+    is worth less than no figure, since a bad stated area turns a correct
+    extraction into a REVIEW (or, worse, corroborates a wrong one).
+    """
+    text = (raw or "").strip() if isinstance(raw, str) else ""
+    if not text:
+        return {}
+    areas: dict[str, float] = {}
+    for part in text.split("|"):
+        key, eq, value = part.strip().partition("=")
+        canonical = _AREA_KEYS.get(key.strip().lower())
+        if not eq or canonical is None:
+            continue
+        # Tolerate "0.185 ha", "4,998 m2" and "<688.0>": the model is quoting a
+        # document, and a stray unit word beside the number is the likeliest
+        # way it does that.
+        cleaned = value.strip().strip("<>").replace(",", "").split(" ")[0]
+        try:
+            areas[canonical] = float(cleaned)
+        except ValueError:
+            continue
+    if not areas:
+        # The document's own phrasing, when the keyed form did not survive:
+        # "0.17 acres", "5,456 SQ. FT.". Losing a stated area is not neutral,
+        # since closure alone can PASS a tract whose area is wrong, so read
+        # what is unambiguous and still drop anything without a unit on it.
+        for value, unit in _AREA_PHRASE_RE.findall(text):
+            canonical = _AREA_UNIT_WORDS[re.sub(r"[^a-z0-9²]", "", unit.lower())]
+            areas.setdefault(canonical, float(value.replace(",", "")))
+    return areas
 
 
 @dataclass
@@ -638,6 +756,158 @@ def parse_aliquot_wire(s: str) -> AliquotDescription | None:
     )
 
 
+@dataclass
+class PlatDescription:
+    """A recorded subdivision plat, as identification rather than geometry.
+
+    v1 reads the title block and the recording stamp and stops there. The
+    boundary a plat carries is drawn linework, and the spike found county scans
+    where the lines are legible to a person and not to anything that would let
+    us claim a verified traverse. Naming the sheet, its subdivision, and where
+    it is recorded is the honest part, and it is also the part a title chain
+    actually indexes on.
+    """
+
+    verbatim_text: str = ""
+    subdivision: str = ""
+    lots: list[str] = field(default_factory=list)
+    blocks: list[str] = field(default_factory=list)
+    recording: RecordingRef | None = None
+    surveyor: str = ""
+    date: str = ""
+
+    def is_empty(self) -> bool:
+        return not (self.subdivision or self.lots or self.blocks or self.verbatim_text)
+
+    def summary(self) -> str:
+        parts = [self.subdivision or "unnamed subdivision"]
+        if self.lots:
+            parts.append(f"lots {', '.join(self.lots)}")
+        if self.blocks:
+            parts.append(f"block {', '.join(self.blocks)}")
+        if self.recording is not None:
+            parts.append(self.recording.text())
+        return " · ".join(parts)
+
+
+# Plats ride as one delimited string, the same shape every other Stage 1 field
+# uses. `parse_plat_wire` rebuilds it.
+PLAT_FORMAT = (
+    "subdivision=<name> | lots=<1 2 3> | blocks=<A> | "
+    "recording=<book=PB 25 ; page=66 ; instrument=<number>> | "
+    "surveyor=<name and license> | date=<yyyy-mm-dd> | verbatim=<the title block>"
+)
+
+
+def parse_plat_wire(raw: str) -> PlatDescription | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    verbatim = ""
+    if "verbatim=" in text:
+        text, _, verbatim = text.partition("verbatim=")
+        verbatim = verbatim.strip().strip("<>")
+    fields = _wire_fields(text)
+    found = PlatDescription(
+        verbatim_text=verbatim or raw.strip(),
+        subdivision=fields.get("subdivision", ""),
+        lots=_tokens(fields.get("lots", "")),
+        blocks=_tokens(fields.get("blocks", "")),
+        # Nested inside a pipe-delimited string, so the reference uses
+        # semicolons and gets translated before RecordingRef sees it.
+        recording=(
+            RecordingRef.from_wire(fields["recording"].replace(" ; ", " | "))
+            if fields.get("recording")
+            else None
+        ),
+        surveyor=fields.get("surveyor", ""),
+        date=fields.get("date", ""),
+    )
+    return None if found.is_empty() else found
+
+
+@dataclass
+class AsBuiltDescription:
+    """A utility as-built sheet, triaged by vintage before anything else.
+
+    Vintage matters more than format here. Post-1990 CAD-era sheets carry
+    stationing and pipe schedules that read cleanly; pre-1980 sheets are
+    frequently mislabeled entirely (one "as-built" in the corpus is an
+    architectural site plan with utility markups). Neither kind states a
+    coordinate basis, so neither produces geometry, and `vintage` is what the
+    verdict leans on to say why.
+    """
+
+    verbatim_text: str = ""
+    agency: str = ""
+    engineer: str = ""
+    utility: str = ""
+    vintage: str = ""
+    stationing: str = ""
+    pipe: str = ""
+    sheets: str = ""
+
+    def is_empty(self) -> bool:
+        return not (self.agency or self.utility or self.verbatim_text or self.engineer)
+
+    def year(self) -> int | None:
+        """The four-digit year in `vintage`, when there is one."""
+        digits = "".join(c if c.isdigit() else " " for c in self.vintage).split()
+        for token in digits:
+            if len(token) == 4 and 1800 <= int(token) <= 2200:
+                return int(token)
+        return None
+
+    def summary(self) -> str:
+        parts = [self.utility or "utility", self.agency or "unnamed agency"]
+        if self.vintage:
+            parts.append(self.vintage)
+        return " · ".join(parts)
+
+
+ASBUILT_FORMAT = (
+    "agency=<city or district> | engineer=<firm> | utility=<sanitary sewer> | "
+    "vintage=<1993> | stationing=<0+00 to 24+50> | pipe=<8in PVC> | "
+    "sheets=<1 of 3> | verbatim=<the title block>"
+)
+
+
+def parse_asbuilt_wire(raw: str) -> AsBuiltDescription | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    verbatim = ""
+    if "verbatim=" in text:
+        text, _, verbatim = text.partition("verbatim=")
+        verbatim = verbatim.strip().strip("<>")
+    fields = _wire_fields(text)
+    found = AsBuiltDescription(
+        verbatim_text=verbatim or raw.strip(),
+        agency=fields.get("agency", ""),
+        engineer=fields.get("engineer", ""),
+        utility=fields.get("utility", ""),
+        vintage=fields.get("vintage", ""),
+        stationing=fields.get("stationing", ""),
+        pipe=fields.get("pipe", ""),
+        sheets=fields.get("sheets", ""),
+    )
+    return None if found.is_empty() else found
+
+
+def _wire_fields(text: str) -> dict[str, str]:
+    """Split a "key=value | key=value" run into a dict, angle brackets stripped."""
+    fields: dict[str, str] = {}
+    for part in text.split(" | "):
+        key, eq, value = part.strip().rstrip("|").strip().partition("=")
+        if eq:
+            fields[key.strip()] = value.strip().strip("<>")
+    return fields
+
+
+def _tokens(value: str) -> list[str]:
+    return [t for t in value.replace(",", " ").split() if t]
+
+
 _METADATA_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -725,7 +995,6 @@ DEED_JSON_SCHEMA: dict[str, Any] = {
                             "additionalProperties": False,
                         },
                     },
-                    "stated_acreage": _NULLABLE_NUMBER,
                     "distance_unit": {
                         "type": "string",
                         "enum": ["feet", "varas", "chains", "meters"],
@@ -743,9 +1012,20 @@ DEED_JSON_SCHEMA: dict[str, Any] = {
                             "facility_relative",
                         ],
                     },
-                    # Square feet as the document states them; see the field's
-                    # comment on Tract for why acres alone will not do.
-                    "stated_area_sqft": _NULLABLE_NUMBER,
+                    # Every area the document states, in ONE STATED_AREA_FORMAT
+                    # string, parsed back into four fields on Tract.
+                    #
+                    # This replaced the `stated_acreage` and `stated_area_sqft`
+                    # numbers rather than joining them, and the swap is the
+                    # budget again: probed 2026-08-09, the shipped schema took
+                    # neither another nullable number nor another plain string
+                    # anywhere, at the tract level or the document level.
+                    # Collapsing those two nullable unions into one string paid
+                    # for the metric figures and left about one slot of room.
+                    # A nullable number is an anyOf union and costs the
+                    # compiler more than a string does; that is the lever when
+                    # the next field has to fit.
+                    "stated_area": {"type": "string"},
                     # One EASEMENT_FORMAT string; "" when the tract is not an
                     # easement burden.
                     "easement": {"type": "string"},
@@ -756,13 +1036,12 @@ DEED_JSON_SCHEMA: dict[str, Any] = {
                     "name",
                     "pob_description",
                     "calls",
-                    "stated_acreage",
                     "distance_unit",
                     "is_exception",
                     "tie_calls",
                     "description_type",
                     "aliquot",
-                    "stated_area_sqft",
+                    "stated_area",
                     "easement",
                 ],
                 "additionalProperties": False,
@@ -770,6 +1049,17 @@ DEED_JSON_SCHEMA: dict[str, Any] = {
         },
         "notes": _NULLABLE_STRING,
         "metadata": _METADATA_SCHEMA,
+        # ONE field for both new classes, in PLAT_FORMAT or ASBUILT_FORMAT
+        # depending on document_kind; "" for deeds and easements.
+        #
+        # This is not tidiness, it is the grammar budget. Probed against the
+        # live compiler on 2026-08-07: the 0.5.0 schema compiles, adding one
+        # document-level string still compiles, and adding two returns 400
+        # "The compiled grammar is too large". A sheet is a plat or an
+        # as-built and never both, so one slot says everything two would.
+        # **This was the last slot.** Anything new rides inside an existing
+        # delimited string from here, and the next addition has to re-probe.
+        "sheet": {"type": "string"},
     },
     "required": [
         "document_kind",
@@ -778,6 +1068,7 @@ DEED_JSON_SCHEMA: dict[str, Any] = {
         "tracts",
         "notes",
         "metadata",
+        "sheet",
     ],
     "additionalProperties": False,
 }

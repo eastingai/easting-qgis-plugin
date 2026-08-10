@@ -1,9 +1,11 @@
 """Build QGIS memory layers from a placed traverse; save to GeoPackage.
 
-The traverse arrives from the API in local feet from the POB. Placement
-translates it to the clicked map point, applies user rotation, and scales feet
-into the target CRS's linear units via QgsUnitTypes. The geometry math that
-produced those vertices is server-side; this module only transforms them.
+The traverse arrives from the API in local feet from the POB, whatever unit the
+document was written in — a metric or varas description is converted before the
+vertices are computed. Placement translates them to the clicked map point,
+applies user rotation, and scales feet into the target CRS's linear units via
+QgsUnitTypes. The geometry math that produced those vertices is server-side;
+this module only transforms them.
 """
 
 from __future__ import annotations
@@ -44,6 +46,11 @@ def _easement_attrs(tract) -> list:
     return [e.easement_type, e.width_ft, e.term, exclusive, servient]
 
 
+def _unit_of(tract) -> str:
+    """The unit the document measured in; feet when a server predates the field."""
+    return getattr(tract, "distance_unit", None) or "feet"
+
+
 def _fields(defs: list[tuple[str, int]]) -> QgsFields:
     fields = QgsFields()
     for name, ftype in defs:
@@ -59,6 +66,11 @@ TRACT_FIELDS = _fields(
         ("closure_ratio", QVariant.String),
         ("computed_acres", QVariant.Double),
         ("stated_acres", QVariant.Double),
+        # The document's own unit, and the computed area in metric. A parcel
+        # recorded in meters is placed in feet like every other parcel, so the
+        # attribute table is where that fact has to be readable.
+        ("computed_sqm", QVariant.Double),
+        ("distance_unit", QVariant.String),
         ("calls", QVariant.Int),
         ("is_exception", QVariant.Bool),
         ("source_doc", QVariant.String),
@@ -85,8 +97,12 @@ CALL_FIELDS = _fields(
         ("call_no", QVariant.Int),
         ("call_type", QVariant.String),
         ("bearing", QVariant.String),
+        # As recorded, in distance_unit — which is feet on a US deed and the
+        # column names say so, but a metric course keeps its own number here
+        # and the unit column is what stops it being read as feet.
         ("distance_ft", QVariant.Double),
         ("radius_ft", QVariant.Double),
+        ("distance_unit", QVariant.String),
         ("confidence", QVariant.String),
         ("monument", QVariant.String),
         ("adjoiner", QVariant.String),
@@ -115,7 +131,9 @@ def place_group(
     """
     import math
 
-    factor = QgsUnitTypes.fromUnitToUnitFactor(QgsUnitTypes.DistanceUnit.DistanceFeet, crs.mapUnits())
+    factor = QgsUnitTypes.fromUnitToUnitFactor(
+        QgsUnitTypes.DistanceUnit.DistanceFeet, crs.mapUnits()
+    )
     theta = math.radians(rotation_deg)
     cos_t, sin_t = math.cos(theta), math.sin(theta)
     placed = []
@@ -188,6 +206,8 @@ def place_tract(
             closure,
             round(geometry.acres, 4),
             tract.stated_acreage,
+            getattr(verdict, "computed_sqm", None),
+            _unit_of(tract),
             len(tract.calls),
             tract.is_exception,
             source_doc,
@@ -223,6 +243,7 @@ def place_tract(
                 bearing.text() if bearing else None,
                 call.effective_distance(),
                 call.radius,
+                _unit_of(tract),
                 call.confidence,
                 call.monument,
                 getattr(call, "adjoiner", None) or "",
@@ -313,6 +334,8 @@ def place_georeferenced_tract(
             f"PLSS {georef.plss_id}" if georef.plss_id else "PLSS",
             georef.acres,
             tract.stated_acreage,
+            getattr(verdict, "computed_sqm", None),
+            _unit_of(tract),
             0,
             tract.is_exception,
             source_doc,

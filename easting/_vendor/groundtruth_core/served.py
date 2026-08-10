@@ -66,6 +66,31 @@ class GeorefGeometry:
         )
 
 
+@dataclass
+class DocumentVerdict:
+    """The verdict on a document that produces no tracts.
+
+    Plats and utility as-builts are identified rather than traced, so their
+    `groundtruth_verdicts` array is empty and this block carries the judgement
+    instead. Absent on deeds and easements, and absent from any server older
+    than 0.6.0, which is why every reader goes through `.get()`.
+    """
+
+    document: str = ""
+    status: str = "REVIEW"  # "REVIEW" | "FAIL"
+    reasons: list[str] = field(default_factory=list)
+    summary: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> DocumentVerdict:
+        return cls(
+            document=d.get("document") or "",
+            status=d.get("status") or "REVIEW",
+            reasons=[str(r) for r in d.get("reasons") or []],
+            summary=d.get("summary") or "",
+        )
+
+
 def _offset_of(raw: Any) -> tuple[float, float] | None:
     """Parse [east_ft, north_ft] defensively; anything malformed is None."""
     try:
@@ -86,6 +111,12 @@ class ServerVerdict:
     computed_acres: float | None = None
     # Present from 0.5+; small easements are verified in square feet.
     computed_sqft: float | None = None
+    # The same area in metric, and the unit the document was measured in.
+    # A metric document is reviewed in metric: the server converts once, so
+    # nothing here has to know what a vara is.
+    computed_sqm: float | None = None
+    computed_hectares: float | None = None
+    distance_unit: str = "feet"
     # None when the tract could not be traversed at all, which is exactly the
     # case where placement must be refused.
     geometry: TractGeometry | None = None
@@ -124,6 +155,11 @@ class ServerVerdict:
                 None if d.get("computed_acres") is None else float(d["computed_acres"])
             ),
             computed_sqft=(None if d.get("computed_sqft") is None else float(d["computed_sqft"])),
+            computed_sqm=(None if d.get("computed_sqm") is None else float(d["computed_sqm"])),
+            computed_hectares=(
+                None if d.get("computed_hectares") is None else float(d["computed_hectares"])
+            ),
+            distance_unit=d.get("distance_unit") or "feet",
             geometry=TractGeometry.from_dict(geometry) if geometry else None,
             georef=GeorefGeometry.from_dict(georef) if georef else None,
             tie_offset=_offset_of(d.get("tie_offset")),
