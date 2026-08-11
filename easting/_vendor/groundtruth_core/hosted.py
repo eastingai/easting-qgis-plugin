@@ -162,7 +162,7 @@ def submit_batch(
         headers={
             "authorization": f"Bearer {api_key}",
             "content-type": f"multipart/form-data; boundary={boundary}",
-            "user-agent": "easting-qgis-plugin/0.6",
+            "user-agent": "easting-qgis-plugin/0.7",
         },
         max_retries=0,  # a resubmit would double-charge; let the user retry
         timeout=timeout,
@@ -197,7 +197,7 @@ def submit_batch_staged(
         headers={
             "authorization": f"Bearer {api_key}",
             "content-type": "application/json",
-            "user-agent": "easting-qgis-plugin/0.6",
+            "user-agent": "easting-qgis-plugin/0.7",
         },
         max_retries=0,  # a resubmit would double-charge; let the user retry
         timeout=timeout,
@@ -228,7 +228,7 @@ def stage_document(api_url: str, api_key: str, pdf_bytes: bytes, timeout: float 
             headers={
                 "authorization": f"Bearer {api_key}",
                 "content-type": "application/json",
-                "user-agent": "easting-qgis-plugin/0.6",
+                "user-agent": "easting-qgis-plugin/0.7",
             },
             max_retries=MAX_RETRIES,
             timeout=60.0,
@@ -281,7 +281,7 @@ def submit_extract(
     """
     headers = {
         "authorization": f"Bearer {api_key}",
-        "user-agent": "easting-qgis-plugin/0.6",
+        "user-agent": "easting-qgis-plugin/0.7",
     }
     if doc_name:
         headers["x-document-name"] = _ascii(doc_name)
@@ -336,7 +336,7 @@ def post_extract_staged(
     headers = {
         "authorization": f"Bearer {api_key}",
         "x-upload-id": upload_id,
-        "user-agent": "easting-qgis-plugin/0.6",
+        "user-agent": "easting-qgis-plugin/0.7",
     }
     if doc_name:
         headers["x-document-name"] = _ascii(doc_name)
@@ -380,6 +380,16 @@ def fetch_dxf(api_url: str, api_key: str, payload: dict, timeout: float = 120.0)
     return _post_artifact(api_url, "/v1/dxf", api_key, payload, timeout)
 
 
+def fetch_geopackage(api_url: str, api_key: str, payload: dict, timeout: float = 120.0) -> bytes:
+    """Convert an extraction into a GeoPackage, server-side.
+
+    The same bargain as the DXF: the retained payload goes back up byte for
+    byte, and the layers that come down are the ones the portal serves, so a
+    GeoPackage saved here and one saved in a browser are the same file.
+    """
+    return _post_artifact(api_url, "/v1/geopackage", api_key, payload, timeout)
+
+
 def fetch_certificate(api_url: str, api_key: str, payload: dict, timeout: float = 120.0) -> bytes:
     """Render the extraction as a certificate PDF, server-side.
 
@@ -399,7 +409,7 @@ def _post_artifact(api_url: str, path: str, api_key: str, payload: dict, timeout
         headers={
             "authorization": f"Bearer {api_key}",
             "content-type": "application/json",
-            "user-agent": "easting-qgis-plugin/0.6",
+            "user-agent": "easting-qgis-plugin/0.7",
         },
         max_retries=MAX_RETRIES,
         timeout=timeout,
@@ -415,7 +425,7 @@ def _get_json(url: str, api_key: str, timeout: float) -> dict:
         method="GET",
         headers={
             "authorization": f"Bearer {api_key}",
-            "user-agent": "easting-qgis-plugin/0.6",
+            "user-agent": "easting-qgis-plugin/0.7",
         },
     )
     if not url.startswith(("https://", "http://localhost", "http://127.0.0.1")):

@@ -164,14 +164,24 @@ class ReviewDock(QDockWidget):
         confirm = QPushButton("Confirm placement")
         confirm.clicked.connect(self.place_confirmed.emit)
         row.addWidget(confirm)
-        save = QPushButton("Save GeoPackage…")
-        save.clicked.connect(self.save_requested.emit)
-        row.addWidget(save)
-        dxf = QPushButton("Save DXF…")
-        dxf.clicked.connect(self.dxf_requested.emit)
         # The server answers 422 when no tract has geometry, so disable rather
         # than let someone click into a refusal they could have been spared.
         placeable = any(v.placeable for v in result.verdicts)
+        save = QPushButton("Save GeoPackage…")
+        save.clicked.connect(self.save_requested.emit)
+        # GeoPackage draws one thing more than the DXF: a georeferenced tract
+        # with no traverse still lands in the WGS 84 layer.
+        drawable = placeable or any(v.georef is not None for v in result.verdicts)
+        save.setEnabled(drawable)
+        save.setToolTip(
+            "Save tract and call layers as a GeoPackage (server-written; "
+            "local-plane layers unplaced, georeferenced tracts placed)."
+            if drawable
+            else "No tract in this document has geometry to write."
+        )
+        row.addWidget(save)
+        dxf = QPushButton("Save DXF…")
+        dxf.clicked.connect(self.dxf_requested.emit)
         dxf.setEnabled(placeable)
         dxf.setToolTip(
             "Export the traverse as a CAD drawing (unplaced: point of "

@@ -9,13 +9,19 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QFileDialog, QMessageBox
 
-from ._vendor.groundtruth_core.hosted import fetch_certificate, fetch_dxf
+from ._vendor.groundtruth_core.hosted import fetch_certificate, fetch_dxf, fetch_geopackage
 from ._vendor.groundtruth_core.model import Tract
 from ._vendor.groundtruth_core.result import ExtractionError, ExtractionResult
 from ._vendor.groundtruth_core.served import ServerVerdict
 from .batch_task import BatchTask
 from .extract_task import ExtractTask
-from .layers import place_georeferenced_tract, place_group, place_tract, save_geopackage
+from .layers import (
+    place_georeferenced_tract,
+    place_group,
+    place_tract,
+    save_geopackage,
+    walked_vertices,
+)
 from .place_tool import PlacePobTool
 from .review_dock import ReviewDock
 from .settings_dialog import SettingsDialog, get_api_url, get_service_key
@@ -380,7 +386,12 @@ class EastingPlugin:
             QgsUnitTypes.DistanceUnit.DistanceFeet, crs.mapUnits()
         )
         self._release_tool()
-        self._tool = PlacePobTool(self.iface.mapCanvas(), verdict.geometry.vertices, factor)
+        # The preview shows the arcs the placed layers will draw, not chords.
+        self._tool = PlacePobTool(
+            self.iface.mapCanvas(),
+            walked_vertices(tract.calls, verdict.geometry.vertices),
+            factor,
+        )
         self._tool.pob_picked.connect(
             lambda _: self.iface.messageBar().pushMessage(
                 "Easting",
@@ -418,7 +429,7 @@ class EastingPlugin:
         factor = QgsUnitTypes.fromUnitToUnitFactor(
             QgsUnitTypes.DistanceUnit.DistanceFeet, crs.mapUnits()
         )
-        rings = [(v.tie_offset, v.geometry.vertices) for _, v in pairs]
+        rings = [(v.tie_offset, walked_vertices(t.calls, v.geometry.vertices)) for t, v in pairs]
         self._release_tool()
         self._tool = PlacePobTool.for_group(self.iface.mapCanvas(), rings, factor)
         self._tool.pob_picked.connect(
@@ -489,6 +500,47 @@ class EastingPlugin:
         )
 
     def _save_gpkg(self) -> None:
+        """Ask the service for the GeoPackage this extraction supports.
+
+        Server-written, like the DXF and the certificate, so a GeoPackage
+        saved here and one saved from the web portal are the same file:
+        tract and call layers on the verdict's own local plane, plus a
+        placed WGS 84 layer for georeferenced tracts. Placed layers on the
+        canvas export through QGIS itself (right-click, Export).
+
+        Extractions kept from before this endpoint fall back to writing the
+        placed layers locally, so the button never stops working mid-session.
+        """
+        if self._result is None:
+            return
+        payload = getattr(self._result, "raw", None)
+        if not payload:
+            self._save_gpkg_local()
+            return
+
+        default = (self._source_doc.rsplit(".", 1)[0] or "extraction") + ".gpkg"
+        path, _ = QFileDialog.getSaveFileName(
+            self.iface.mainWindow(), "Save GeoPackage", default, "GeoPackage (*.gpkg)"
+        )
+        if not path:
+            return
+        if not path.endswith(".gpkg"):
+            path += ".gpkg"
+        try:
+            package = fetch_geopackage(get_api_url(), get_service_key(), payload)
+        except ExtractionError as exc:
+            QMessageBox.warning(self.iface.mainWindow(), "Easting", str(exc))
+            return
+        Path(path).write_bytes(package)
+        self.iface.messageBar().pushMessage(
+            "Easting",
+            f"Saved {Path(path).name}. Local-plane layers are unplaced; "
+            "georeferenced tracts carry a placed WGS 84 layer.",
+            level=Qgis.MessageLevel.Success,
+        )
+
+    def _save_gpkg_local(self) -> None:
+        """The pre-endpoint path: write the placed canvas layers directly."""
         if not self._placed_layers:
             QMessageBox.information(
                 self.iface.mainWindow(), "Easting", "Place a tract on the map first."

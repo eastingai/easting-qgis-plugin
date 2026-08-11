@@ -19,16 +19,20 @@ from qgis.core import (
     QgsField,
     QgsFields,
     QgsGeometry,
+    QgsPalLayerSettings,
     QgsPointXY,
     QgsProject,
+    QgsTextFormat,
     QgsUnitTypes,
     QgsVectorFileWriter,
     QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
 )
 from qgis.PyQt.QtCore import QVariant
 
-from ._vendor.groundtruth_core.model import Tract
+from ._vendor.groundtruth_core.model import Call, Tract
 from ._vendor.groundtruth_core.served import ServerVerdict
+from .arcs import arc_points
 
 FEET_UNIT = QgsUnitTypes.DistanceUnit.DistanceFeet
 
@@ -156,6 +160,32 @@ def place_group(
     return placed
 
 
+def _arc_between(call: Call, start: tuple[float, float], end: tuple[float, float]) -> list:
+    """Intermediate arc points for a curve call, or nothing for a chord."""
+    if (
+        call.call_type != "curve"
+        or not call.radius
+        or call.curve_direction not in ("left", "right")
+    ):
+        return []
+    return arc_points(start, end, float(call.radius), call.curve_direction)
+
+
+def walked_vertices(calls: list[Call], vertices: list) -> list[tuple[float, float]]:
+    """The boundary in local feet as the traverse actually walked it.
+
+    Chord endpoints with every curve call swelled to its arc. A curve drawn
+    as its bare chord misstates the boundary by the middle ordinate, 22.7
+    feet on the customer-reported Garfield County highway curve, so both the
+    placement preview and the placed layers draw from this."""
+    walked: list[tuple[float, float]] = [tuple(vertices[0])]
+    for i in range(len(vertices) - 1):
+        start, end = tuple(vertices[i]), tuple(vertices[i + 1])
+        between = _arc_between(calls[i], start, end) if i < len(calls) else []
+        walked.extend([*between, end])
+    return walked
+
+
 def place_tract(
     tract: Tract,
     verdict: ServerVerdict,
@@ -183,7 +213,14 @@ def place_tract(
         yr = x_ft * sin_t + y_ft * cos_t
         return QgsPointXY(pob.x() + xr * to_crs_units, pob.y() + yr * to_crs_units)
 
-    pts = [to_map(x, y) for x, y in geometry.vertices]
+    def course_local(i: int) -> list[tuple[float, float]]:
+        """One course in local feet: the arc the document described, or its chord."""
+        start = tuple(geometry.vertices[i])
+        end = tuple(geometry.vertices[i + 1])
+        between = _arc_between(tract.calls[i], start, end) if i < len(tract.calls) else []
+        return [start, *between, end]
+
+    pts = [to_map(x, y) for x, y in walked_vertices(tract.calls, geometry.vertices)]
     ring = pts if geometry.misclosure < 1e-9 else pts + [pts[0]]
 
     crs_id = crs.authid()
@@ -232,8 +269,10 @@ def place_tract(
 
     line_feats = []
     for i, call in enumerate(tract.calls):
+        if i + 1 >= len(geometry.vertices):
+            break
         seg = QgsFeature(line_layer.fields())
-        seg.setGeometry(QgsGeometry.fromPolylineXY([pts[i], pts[i + 1]]))
+        seg.setGeometry(QgsGeometry.fromPolylineXY([to_map(x, y) for x, y in course_local(i)]))
         bearing = call.effective_bearing()
         seg.setAttributes(
             [
@@ -253,8 +292,28 @@ def place_tract(
         line_feats.append(seg)
     line_layer.dataProvider().addFeatures(line_feats)
     line_layer.updateExtents()
+    _label_courses(line_layer)
 
     return poly_layer, line_layer
+
+
+def _label_courses(line_layer: QgsVectorLayer) -> None:
+    """Number each course on the map the way the certificate figure does.
+
+    Same key, same meaning: course N on the canvas is row N in the call
+    table and course N on the certificate, so the three artifacts read as
+    one. The attribute was always there; this turns the label on.
+    """
+    settings = QgsPalLayerSettings()
+    settings.fieldName = "call_no"
+    # Scoped enum, not the Qt5 shorthand: the plugin repository's Qt6
+    # compatibility checker rejects `QgsPalLayerSettings.Line`.
+    settings.placement = QgsPalLayerSettings.Placement.Line
+    fmt = QgsTextFormat()
+    fmt.setSize(9)
+    settings.setFormat(fmt)
+    line_layer.setLabelsEnabled(True)
+    line_layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
 
 
 def save_geopackage(layers: list[QgsVectorLayer], path: str) -> str | None:
