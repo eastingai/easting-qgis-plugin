@@ -162,7 +162,7 @@ def submit_batch(
         headers={
             "authorization": f"Bearer {api_key}",
             "content-type": f"multipart/form-data; boundary={boundary}",
-            "user-agent": "easting-qgis-plugin/0.7",
+            "user-agent": "easting-qgis-plugin/0.8",
         },
         max_retries=0,  # a resubmit would double-charge; let the user retry
         timeout=timeout,
@@ -197,7 +197,7 @@ def submit_batch_staged(
         headers={
             "authorization": f"Bearer {api_key}",
             "content-type": "application/json",
-            "user-agent": "easting-qgis-plugin/0.7",
+            "user-agent": "easting-qgis-plugin/0.8",
         },
         max_retries=0,  # a resubmit would double-charge; let the user retry
         timeout=timeout,
@@ -228,7 +228,7 @@ def stage_document(api_url: str, api_key: str, pdf_bytes: bytes, timeout: float 
             headers={
                 "authorization": f"Bearer {api_key}",
                 "content-type": "application/json",
-                "user-agent": "easting-qgis-plugin/0.7",
+                "user-agent": "easting-qgis-plugin/0.8",
             },
             max_retries=MAX_RETRIES,
             timeout=60.0,
@@ -281,7 +281,7 @@ def submit_extract(
     """
     headers = {
         "authorization": f"Bearer {api_key}",
-        "user-agent": "easting-qgis-plugin/0.7",
+        "user-agent": "easting-qgis-plugin/0.8",
     }
     if doc_name:
         headers["x-document-name"] = _ascii(doc_name)
@@ -336,7 +336,7 @@ def post_extract_staged(
     headers = {
         "authorization": f"Bearer {api_key}",
         "x-upload-id": upload_id,
-        "user-agent": "easting-qgis-plugin/0.7",
+        "user-agent": "easting-qgis-plugin/0.8",
     }
     if doc_name:
         headers["x-document-name"] = _ascii(doc_name)
@@ -401,6 +401,60 @@ def fetch_certificate(api_url: str, api_key: str, payload: dict, timeout: float 
     return _post_artifact(api_url, "/v1/certificate", api_key, payload, timeout)
 
 
+def fetch_location(
+    api_url: str,
+    api_key: str,
+    payload: dict,
+    source: str = "plss_corner",
+    timeout: float = 120.0,
+) -> dict:
+    """Ask the service where an extraction's tracts sit.
+
+    Returns the whole re-signed extraction rather than just the suggestions,
+    because the signature covers the body as a unit: splicing the new
+    `location` blocks into the payload already held would leave something
+    nothing can certify. Callers replace what they hold with what comes back.
+
+    The retained payload goes back up byte for byte, for the same reason the
+    certificate's does.
+    """
+    raw = _post_artifact(
+        api_url, "/v1/locate", api_key, {"extraction": payload, "source": source}, timeout
+    )
+    return _json_body(raw)
+
+
+def fetch_corrections(
+    api_url: str,
+    api_key: str,
+    payload: dict,
+    corrections: list[dict] | None = None,
+    adjust: list[int] | None = None,
+    by: str = "",
+    timeout: float = 120.0,
+) -> dict:
+    """Ask the service to apply a correction, or to close a shape.
+
+    Two different asks, and the answer keeps them apart. A correction says the
+    document reads something else and we misread it, so the verdicts come back
+    recomputed over it. `adjust` fits a tract's courses so the shape closes,
+    and the verdict deliberately does not move: the recorded description still
+    miscloses and the certificate says so.
+
+    Returns the whole re-signed extraction rather than the changed pieces,
+    because the signature covers the body as a unit: editing the payload
+    already held would leave something nothing can certify, which is the
+    reason this is a round trip rather than a local edit.
+    """
+    body = {
+        "extraction": payload,
+        "corrections": corrections or [],
+        "adjust": adjust or [],
+        "by": by,
+    }
+    return _json_body(_post_artifact(api_url, "/v1/corrections", api_key, body, timeout))
+
+
 def _post_artifact(api_url: str, path: str, api_key: str, payload: dict, timeout: float) -> bytes:
     """One request shape for every document the service renders for us."""
     return post_with_retries(
@@ -409,7 +463,7 @@ def _post_artifact(api_url: str, path: str, api_key: str, payload: dict, timeout
         headers={
             "authorization": f"Bearer {api_key}",
             "content-type": "application/json",
-            "user-agent": "easting-qgis-plugin/0.7",
+            "user-agent": "easting-qgis-plugin/0.8",
         },
         max_retries=MAX_RETRIES,
         timeout=timeout,
@@ -425,7 +479,7 @@ def _get_json(url: str, api_key: str, timeout: float) -> dict:
         method="GET",
         headers={
             "authorization": f"Bearer {api_key}",
-            "user-agent": "easting-qgis-plugin/0.7",
+            "user-agent": "easting-qgis-plugin/0.8",
         },
     )
     if not url.startswith(("https://", "http://localhost", "http://127.0.0.1")):

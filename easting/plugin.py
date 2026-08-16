@@ -4,12 +4,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from qgis.core import Qgis, QgsApplication, QgsProject, QgsUnitTypes
+from qgis.core import (
+    Qgis,
+    QgsApplication,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsPointXY,
+    QgsProject,
+    QgsUnitTypes,
+)
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QFileDialog, QMessageBox
 
-from ._vendor.groundtruth_core.hosted import fetch_certificate, fetch_dxf, fetch_geopackage
+from ._vendor.groundtruth_core.hosted import (
+    fetch_certificate,
+    fetch_corrections,
+    fetch_dxf,
+    fetch_geopackage,
+    fetch_location,
+    result_from_payload,
+)
 from ._vendor.groundtruth_core.model import Tract
 from ._vendor.groundtruth_core.result import ExtractionError, ExtractionResult
 from ._vendor.groundtruth_core.served import ServerVerdict
@@ -152,6 +167,11 @@ class EastingPlugin:
             self._dock.save_requested.connect(self._save_gpkg)
             self._dock.dxf_requested.connect(self._save_dxf)
             self._dock.certificate_requested.connect(self._save_certificate)
+            self._dock.locate_requested.connect(self._suggest_locations)
+            self._dock.correction_requested.connect(self._apply_corrections)
+            self._dock.close_requested.connect(self._close_shape)
+            self._dock.correction_refused.connect(self._on_correction_refused)
+            self._dock.place_suggested_requested.connect(self._place_at_suggestion)
             self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock)
         self._dock.show_result(result, self._source_doc)
         self._dock.show()
@@ -358,6 +378,163 @@ class EastingPlugin:
         QMessageBox.warning(self.iface.mainWindow(), "Easting", message)
 
     # -- placement flow --------------------------------------------------------
+    def _suggest_locations(self) -> None:
+        """Ask the service where these tracts sit, and redraw the dock.
+
+        The whole re-signed extraction replaces the one held, because the
+        attestation covers the body as a unit: keeping the old payload and
+        splicing the suggestions in would leave something the certificate
+        endpoint refuses.
+        """
+        if self._result is None:
+            return
+        payload = getattr(self._result, "raw", None)
+        if not payload:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Easting",
+                "This extraction predates location suggestions. Re-run it to ask.",
+            )
+            return
+        try:
+            answer = fetch_location(get_api_url(), get_service_key(), payload)
+        except ExtractionError as exc:
+            QMessageBox.warning(self.iface.mainWindow(), "Easting", str(exc))
+            return
+
+        located = int(answer.get("located") or 0)
+        body = answer.get("extraction") or {}
+        try:
+            self._result = result_from_payload(body)
+        except ExtractionError as exc:
+            QMessageBox.warning(self.iface.mainWindow(), "Easting", str(exc))
+            return
+        if self._dock is not None:
+            self._dock.show_result(self._result, self._source_doc)
+        self.iface.messageBar().pushMessage(
+            "Easting",
+            (
+                f"Suggested a location for {located} tract(s). Nothing is placed until you confirm."
+                if located
+                else "No tract here commences at a PLSS corner the fabric resolves. "
+                "The dock says which corners were tried."
+            ),
+            level=Qgis.MessageLevel.Info if located else Qgis.MessageLevel.Warning,
+        )
+
+    # -- corrections -----------------------------------------------------------
+    def _apply_corrections(self, corrections: list) -> None:
+        """Send a correction and hold what comes back.
+
+        A correction says the document reads something else and we misread it,
+        so the service recomputes the verdicts over it and re-signs. Nothing is
+        edited here: a payload changed in the client is one the certificate
+        refuses, which is exactly why this is a round trip.
+        """
+        self._correct(corrections=corrections)
+
+    def _on_correction_refused(self, message: str) -> None:
+        """A typed value the dock could not read. Said out loud, in the bar,
+        rather than swallowed — the cell has already gone back to what it
+        said, and an edit that silently did nothing is worse than a refusal."""
+        self.iface.messageBar().pushMessage("Easting", message, level=Qgis.MessageLevel.Warning)
+
+    def _close_shape(self, tract_index: int) -> None:
+        """Fit one tract's courses so the shape closes.
+
+        **The verdict does not move.** It judges the recorded description,
+        which still miscloses, and the certificate prints how much was
+        distributed. An adjustment the operator did not ask for, or one nobody
+        downstream can see, is the silent auto-close this product refuses.
+        """
+        self._correct(adjust=[tract_index])
+
+    def _correct(self, corrections: list | None = None, adjust: list | None = None) -> None:
+        """The shared half: post, replace what is held, redraw.
+
+        Placement is cleared because the geometry underneath it may have
+        changed. A tract left drawn at its pre-correction shape would be the
+        stalest thing on the canvas and the likeliest thing to be exported.
+        """
+        if self._result is None:
+            return
+        payload = getattr(self._result, "raw", None)
+        if not payload:
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Easting",
+                "This extraction predates corrections. Re-run it to edit values.",
+            )
+            return
+        try:
+            answer = fetch_corrections(
+                get_api_url(),
+                get_service_key(),
+                payload,
+                corrections=corrections,
+                adjust=adjust,
+            )
+            self._result = result_from_payload(answer.get("extraction") or {})
+        except ExtractionError as exc:
+            QMessageBox.warning(self.iface.mainWindow(), "Easting", str(exc))
+            if self._dock is not None:
+                self._dock.show_result(self._result, self._source_doc)
+            return
+
+        if self._dock is not None:
+            self._dock.show_result(self._result, self._source_doc)
+        corrected = int(answer.get("corrected") or 0)
+        adjusted = int(answer.get("adjusted") or 0)
+        self.iface.messageBar().pushMessage(
+            "Easting",
+            (
+                f"Adjusted {adjusted} tract(s). The verdict is unchanged: the "
+                "recorded courses still do not close, and the certificate says so."
+                if adjusted
+                else f"Corrected and re-verified {corrected} tract(s). "
+                "The change is printed on the certificate."
+            ),
+            level=Qgis.MessageLevel.Info,
+        )
+
+    def _place_at_suggestion(self, tract: Tract, verdict: ServerVerdict) -> None:
+        """Start the ordinary placement tool, pre-seeded at the suggestion.
+
+        Deliberately the same tool and the same Confirm. The operator watches
+        the band land where the service thinks it goes, adjusts rotation, and
+        commits it themselves; a suggestion that placed itself would be the
+        auto-accept this product refuses.
+        """
+        location = getattr(verdict, "location", None)
+        if location is None or not location.placeable:
+            return
+        self._start_placement(tract, verdict)
+        if self._tool is None:
+            return  # _start_placement refused, and has already said why
+        project_crs = QgsProject.instance().crs()
+        transform = QgsCoordinateTransform(
+            QgsCoordinateReferenceSystem("EPSG:4326"), project_crs, QgsProject.instance()
+        )
+        lon, lat = location.pob
+        try:
+            point = transform.transform(QgsPointXY(lon, lat))
+        except Exception:  # noqa: BLE001 — an untransformable CRS is a message, not a crash
+            QMessageBox.warning(
+                self.iface.mainWindow(),
+                "Easting",
+                "The suggested location cannot be transformed into this project's CRS.",
+            )
+            return
+        self._tool.preview_at(point)
+        self.iface.mapCanvas().setCenter(point)
+        self.iface.mapCanvas().refresh()
+        self.iface.messageBar().pushMessage(
+            "Easting",
+            f"{tract.name} previewed at the suggested point of beginning. "
+            "Adjust rotation if the basis of bearings is not grid north, then Confirm.",
+            level=Qgis.MessageLevel.Info,
+        )
+
     def _start_placement(self, tract: Tract, verdict: ServerVerdict) -> None:
         # The server decides traversability; a verdict without geometry is that
         # decision, and its reasons are what the user needs to see.

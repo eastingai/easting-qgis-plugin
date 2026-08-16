@@ -5,22 +5,29 @@ qgisMinimumVersion=3.28
 # users cannot see the plugin at all. The code imports through qgis.PyQt
 # with scoped enums throughout, so one build serves both major versions.
 qgisMaximumVersion=4.99
-supportsQt6=True
-description=Turn recorded deeds into validated parcel geometry. Vision-LLM extraction of metes-and-bounds descriptions, checked by deterministic closure math; click the point of beginning to place the parcel on your map. Batch folders, DXF export, and plat/as-built identification included.
-about=Easting reads a recorded deed (PDF, TIFF, PNG, or JPEG), extracts every boundary call (bearing/distance/curves), then recomputes the traverse and validates closure and stated acreage before anything reaches your map. Every result carries a GroundTruth verdict, the verification layer behind all Easting products: PASS (closes and corroborates), REVIEW (flagged for human eyes, with reasons), FAIL (not traversable). REQUIRES A SERVICE ACCOUNT: extraction runs on the hosted Easting API, so the plugin uploads each document you extract to easting.ai and needs an Easting API key to work. There is no offline mode. See https://easting.ai for keys and terms. This release covers Easting Deeds: metes-and-bounds and PLSS/aliquot descriptions. Aliquot tracts georeference from the BLM CadNSDI fabric and place with one click; deed metadata (parties, recording references, plat citations) and tie courses render in the review dock and export with the GeoPackage.
-version=0.7.0
+description=Turn recorded deeds, easements, plats, and as-builts into validated parcel geometry. Easting extracts every boundary call with the source text it came from, recomputes the traverse, and checks closure and stated area before drawing anything. Batch folders, DXF and GeoPackage export, filable certificate.
+about=Easting reads a recorded land document (PDF, TIFF, PNG, or JPEG) and returns geometry you can defend: every boundary call extracted with the sentence it came from, the traverse recomputed, and closure and stated area checked independently before anything reaches your map. Every result carries a GroundTruth verdict, the verification layer behind all Easting products: PASS (closes and corroborates), REVIEW (flagged for human eyes, with reasons), FAIL (not traversable). It refuses to draw geometry a document never described, and says which case it hit. Four document classes ship today: metes-and-bounds deeds, PLSS/aliquot deeds, recorded easements and rights of way, and recorded plats and utility as-builts. Export a GeoPackage, a DXF, or the one-page GroundTruth Certificate of Digitization. REQUIRES A SERVICE ACCOUNT: extraction runs on the hosted Easting API, so the plugin uploads each document you extract to easting.ai and needs an Easting API key to work. There is no offline mode. You can create an account from the plugin's own Settings dialog in about a minute: three documents are free, no card. The same account works in the browser at app.easting.ai and over the API. See https://easting.ai for keys, pricing, and terms.
+version=0.8.0
 author=Easting
 email=support@easting.ai
 license=GPL-2.0-or-later
 experimental=False
 hasProcessingProvider=no
-tags=deed,parcel,cadastre,ocr,ai,digitizing,land records,metes and bounds
+tags=deed,easement,right of way,plat,parcel,cadastre,survey,title,closure,ocr,ai,digitizing,land records,metes and bounds
 homepage=https://easting.ai/
 tracker=https://github.com/eastingai/easting-qgis-plugin/issues
 repository=https://github.com/eastingai/easting-qgis-plugin
 icon=icon.png
 changelog=
+    0.8.0
+    * Start free without leaving QGIS: Settings now has a signup form. Three documents, no card, in exchange for your email, company and role. The key is written straight into your profile, so the next thing you do is extract a deed
+    * Correct what was misread: double-click a bearing or a distance in the call table, type what the instrument says, and the service re-verifies and re-signs the document. Nothing is overwritten: the certificate prints your change beside what was extracted, with who made it and why
+    * Close the shape: fit a tract's courses by compass rule when the recorded description does not close. The verdict does not change, because the record still does not close; the certificate says how much was distributed
+    * The user guide moved to docs.easting.ai, split by surface; Settings links the QGIS guide directly
     0.7.0
+    * Suggested locations: ask the service whether a tract commences at a PLSS corner it can resolve, preview the parcel there, and confirm it yourself. It declines far more often than it fires, and says which corner it tried when it does
+    * Save DXF… is reachable again: the button was built and never added to the dock, so CAD export had been available only through the browser and the API
+    * The dock's controls are two rows: placement above, document actions below
     * Curves draw as arcs: the placement preview, placed layers, GeoPackage, and certificate figure all densify each curve from its radius and direction instead of drawing the chord (a chord misstates a highway curve by tens of feet at mid-arc)
     * Save GeoPackage… is now server-written from the extraction itself: tract and call layers with the full attribute schema, plus a placed WGS 84 layer for georeferenced tracts; the same file the web portal saves
     * Course numbers label each boundary line on the canvas, matching the certificate figure and the call table

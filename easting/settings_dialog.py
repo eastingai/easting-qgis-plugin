@@ -14,6 +14,7 @@ from qgis.PyQt.QtWidgets import (
     QFormLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
 )
 
 from .theme import secondary_text
@@ -57,19 +58,22 @@ class SettingsDialog(QDialog):
         self._url_edit.setPlaceholderText(DEFAULT_API_URL)
         form.addRow("API URL", self._url_edit)
 
+        # The old version of this row was six links in one paragraph, and the
+        # phrase "card required" sat in the middle of it, at the moment
+        # somebody had just decided to try the thing. The offer is now a button
+        # that finishes without leaving QGIS.
+        self._start_free = QPushButton("Start free: 3 documents, no card")
+        self._start_free.clicked.connect(self._signup)
+        form.addRow(self._start_free)
+
         get_key = QLabel(
-            'New to the plugin? <a href="https://easting.ai/help/">The user '
-            "guide</a> walks install through GeoPackage export. "
-            'No key yet? <a href="https://easting.ai/products/deeds/">Start a free '
-            "trial at easting.ai</a>: 3 documents on us, card required, and the "
-            "key is shown once at checkout. Only need a few documents a year? "
-            'A <a href="https://api.easting.ai/billing/checkout?tier=pack-10">'
-            "$30 document pack</a> holds 10 credits that never expire. Lost the "
-            'key, or rotating it? <a href="https://api.easting.ai/account">Manage '
-            "it at your account page</a>. Using the service means accepting the "
-            '<a href="https://easting.ai/terms/">Terms of Service</a> and '
-            '<a href="https://easting.ai/privacy/">Privacy Policy</a>; checkout '
-            "asks for that acceptance explicitly."
+            # docs.easting.ai directly, from this release on. The old
+            # easting.ai/help/ URL keeps redirecting forever for the installed
+            # copies of 0.7.0 that carry it (docs/plans/DOCS_SITE.md).
+            'New here? <a href="https://docs.easting.ai/plugin/?src=plugin">The user guide</a> '
+            "walks install through GeoPackage export. Already have a key? Paste "
+            "it above. Lost it, or rotating? "
+            '<a href="https://api.easting.ai/account?src=plugin">Your account page</a>.'
         )
         get_key.setWordWrap(True)
         get_key.setOpenExternalLinks(True)
@@ -91,6 +95,20 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
+
+    def _signup(self) -> None:
+        """Sign up against whatever URL is in the box, not the default.
+
+        Someone pointed at a staging endpoint should get a staging account,
+        and reading the field rather than the constant is the difference.
+        """
+        from .signup_dialog import SignupDialog
+
+        dialog = SignupDialog(self._url_edit.text().strip() or DEFAULT_API_URL, self)
+        if dialog.exec() and dialog.api_key:
+            self._key_edit.setText(dialog.api_key)
+            self._start_free.setText("Key added. Save to finish.")
+            self._start_free.setEnabled(False)
 
     def _save(self) -> None:
         settings = QgsSettings()

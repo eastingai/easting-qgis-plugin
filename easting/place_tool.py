@@ -72,6 +72,19 @@ class PlacePobTool(QgsMapToolEmitPoint):
         self._draw_at(self._pob)
         self.pob_picked.emit(self._pob)
 
+    def preview_at(self, point: QgsPointXY) -> None:
+        """Seed the preview at a suggested position, as if it had been clicked.
+
+        The suggestion comes from the service, and everything after this is the
+        ordinary flow: the band is on the canvas, the rotation slider works,
+        and nothing reaches a layer until Confirm. That equivalence is the
+        assist-never-auto-accept rule expressed where the operator meets it,
+        rather than asserted in a docstring somewhere.
+        """
+        self._pob = point
+        self._draw_at(point)
+        self.pob_picked.emit(point)
+
     def set_rotation(self, degrees: float) -> None:
         self._rotation_deg = degrees
         if self._pob is not None:

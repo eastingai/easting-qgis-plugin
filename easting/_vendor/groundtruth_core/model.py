@@ -15,7 +15,32 @@ from dataclasses import dataclass, field
 from typing import Any
 
 CONFIDENCES = ("high", "medium", "low")
-DISTANCE_UNITS = ("feet", "varas", "chains", "meters")
+DISTANCE_UNITS = (
+    "feet",
+    "inches",
+    "yards",
+    "miles",
+    "rods",
+    "poles",
+    "perches",
+    "chains",
+    "links",
+    "meters",
+    "kilometers",
+    "varas",
+    "arpents",
+)
+
+
+# Quadrant bearings as people write them: the separators are all optional and
+# interchangeable, so a pasted "N 87°30'00\" E" and a typed "N87 30 00 E" parse
+# the same. Anything outside this shape is refused rather than approximated.
+_BEARING_TEXT = re.compile(
+    r"""^([NSns])\s*(\d+(?:\.\d+)?)\s*(?:°|d|deg)?\s*
+        (?:(\d+)\s*(?:'|m|min)?\s*)?
+        (?:(\d+(?:\.\d+)?)\s*(?:"|s|sec)?\s*)?([EWew])$""",
+    re.VERBOSE,
+)
 
 
 @dataclass
@@ -38,6 +63,41 @@ class BearingModel:
 
     def text(self) -> str:
         return f"{self.ns} {self.degrees}°{self.minutes:02d}'{self.seconds:04.1f}\" {self.ew}"
+
+    @classmethod
+    def from_text(cls, text: str) -> BearingModel:
+        """A typed quadrant bearing, or a ValueError naming what went wrong.
+
+        Accepts what a surveyor types rather than one canonical spelling —
+        `N 87°30'00" E`, `N87 30 00 E`, `S 4d 12m E`, degrees with a decimal
+        instead of minutes — and refuses anything it cannot read outright. A
+        parser that guesses here would hand back a confident number nobody
+        typed, which is the failure this product declines everywhere else.
+        """
+        match = _BEARING_TEXT.match(" ".join(text.strip().split()))
+        if match is None:
+            raise ValueError(f'"{text}" is not a bearing. Write it as e.g. N 87°30\'00" E.')
+        ns, raw_degrees, raw_minutes, raw_seconds, ew = match.groups()
+        degrees = float(raw_degrees)
+        minutes = float(raw_minutes or 0)
+        seconds = float(raw_seconds or 0)
+        if raw_minutes is None and degrees != int(degrees):
+            # Decimal degrees with nothing after them: N 87.5 E is 87°30'.
+            fraction = (degrees - int(degrees)) * 60.0
+            degrees = int(degrees)
+            minutes = int(fraction)
+            seconds = round((fraction - minutes) * 60.0, 1)
+        if degrees > 90 or minutes >= 60 or seconds >= 60:
+            raise ValueError(
+                f'"{text}" is outside a quadrant: degrees run 0-90, minutes and seconds 0-59.'
+            )
+        return cls(
+            ns=ns.upper(),
+            degrees=int(degrees),
+            ew=ew.upper(),
+            minutes=int(minutes),
+            seconds=float(seconds),
+        )
 
 
 @dataclass
@@ -386,6 +446,10 @@ class Tract:
     # against our arithmetic instead of the document's.
     stated_area_sqft: float | None = None
     stated_area_sqm: float | None = None
+    # Square arpents. A Louisiana long lot states "containing 7 arpents" and
+    # means 5.924 acres, so this is kept in the document's own unit and
+    # compared in it, like every other stated area.
+    stated_area_arpents: float | None = None
     stated_hectares: float | None = None
     easement: EasementDescription | None = None
     aliquot: AliquotDescription | None = None
@@ -410,6 +474,7 @@ class Tract:
             description_type=d.get("description_type") or "metes_and_bounds",
             stated_area_sqft=_opt_float(d.get("stated_area_sqft")) or areas.get("sqft"),
             stated_area_sqm=_opt_float(d.get("stated_area_sqm")) or areas.get("sqm"),
+            stated_area_arpents=_opt_float(d.get("stated_area_arpents")) or areas.get("arpents"),
             stated_hectares=_opt_float(d.get("stated_hectares")) or areas.get("ha"),
             easement=_easement_of(d.get("easement")),
             aliquot=_parse_aliquot_value(d.get("aliquot")),
@@ -542,6 +607,11 @@ _AREA_KEYS = {
     "square_meters": "sqm",
     "ha": "ha",
     "hectares": "ha",
+    # Louisiana states its areas in square arpents and writes them "arpents".
+    "arpents": "arpents",
+    "arpent": "arpents",
+    "sq_arpents": "arpents",
+    "square_arpents": "arpents",
 }
 
 # The same units as words, for the fallback below. Keys are the unit text with
@@ -559,6 +629,9 @@ _AREA_UNIT_WORDS = {
     "squaremetres": "sqm",
     "m2": "sqm",
     "m²": "sqm",
+    "arpents": "arpents",
+    "arpent": "arpents",
+    "squarearpents": "arpents",
     "ha": "ha",
     "hectare": "ha",
     "hectares": "ha",
@@ -567,7 +640,7 @@ _AREA_UNIT_WORDS = {
 _AREA_PHRASE_RE = re.compile(
     r"([\d,]+(?:\.\d+)?)\s*"
     r"(acres?|ac|sq\.?\s*ft\.?|square\s+f(?:ee|oo)t|sf|sq\.?\s*m|square\s+met(?:er|re)s?|"
-    r"m2|m²|hectares?|ha)\b",
+    r"m2|m²|hectares?|ha|arpents?)\b",
     re.IGNORECASE,
 )
 
@@ -997,7 +1070,7 @@ DEED_JSON_SCHEMA: dict[str, Any] = {
                     },
                     "distance_unit": {
                         "type": "string",
-                        "enum": ["feet", "varas", "chains", "meters"],
+                        "enum": list(DISTANCE_UNITS),
                     },
                     "is_exception": {"type": "boolean"},
                     "tie_calls": {"type": "array", "items": {"type": "string"}},
